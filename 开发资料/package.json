@@ -1,0 +1,21 @@
+{
+  "name": "the-lethe-workbench",
+  "version": "0.4.1",
+  "private": true,
+  "type": "module",
+  "description": "The Lethe Workbench 路 杈圭嫳宸ヤ綔鍙帮紙Limbus Company / Lethe 绉佹湇 Mod 妗岄潰缂栬緫鍣級",
+  "main": "src/main.mjs",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node src/cli.mjs serve",
+    "locate": "node src/cli.mjs locate",
+    "version": "node src/cli.mjs version",
+    "test": "node test/run.mjs",
+    "build:server": "node tools/build-server.mjs",
+    "build:app": "node tools/build-app.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
