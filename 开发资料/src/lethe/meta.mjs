@@ -1,8 +1,14 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { cpSync } from 'node:fs';
 import { readJson, writeFileAtomic } from '../atomic.mjs';
 import { cleanName, SafetyError } from '../safety.mjs';
 import { workbenchDir } from './state.mjs';
+import { ENGINE_TIMINGS } from '../knowledge/timings.mjs';
+import { canonicalCommand } from '../knowledge/modular-tables.mjs';
+import { SCOPE_IDS, timingAllowed, commandAllowed, scopeZh } from '../knowledge/scopes.mjs';
+import { timingArgs } from '../knowledge/timing-args.mjs';
 
 /**
  * 编辑器侧元数据（不写进游戏数据）：
@@ -10,7 +16,14 @@ import { workbenchDir } from './state.mjs';
  *  - meta/modules/<moduleId>.json：模块库（当前仅 3 个测试模块，模块编辑上线后由它接管）
  * 说明：字段与游戏 JSON 的映射尚未落实，见 docs/06-待落实：编辑器↔游戏映射.md
  */
-export const META_VERSION = 1;
+export /** 时点前缀统一存英文名：老数据里可能是数字 id（0/7/14/-1），读入时换算。 */
+const TIMING_ID_TO_EN = new Map(ENGINE_TIMINGS.map((t) => [String(t.id), t.en]));
+function normalizePrefix(prefix) {
+  const raw = String(prefix ?? '').trim();
+  if (!raw) return '';
+  return TIMING_ID_TO_EN.get(raw) || raw;
+}
+const META_VERSION = 1;
 
 export const DEFAULT_INFO = {
   basePower: 4,
@@ -96,7 +109,19 @@ export const BUFF_TYPES = [
   { id: 'Neutral', zh: '中性' },
 ];
 
-export function metaRoot(letheRoot) { return join(workbenchDir(letheRoot), 'meta'); }
+function designRoot(letheRoot) {
+  const base = process.env.LOCALAPPDATA || process.env.HOME || '.';
+  const h = createHash('sha1').update(String(letheRoot || '').toLowerCase()).digest('hex').slice(0, 12);
+  return join(base, 'LetheWorkbench', 'projects', h);
+}
+export function metaRoot(letheRoot) {
+  const next = designRoot(letheRoot);
+  const legacy = join(workbenchDir(letheRoot), 'meta');
+  try {
+    if (!existsSync(next) && existsSync(legacy)) cpSync(legacy, next, { recursive: true });
+  } catch {}
+  return next;
+}
 export function modulesDir(letheRoot) { return join(metaRoot(letheRoot), 'modules'); }
 export function skillsMetaDir(letheRoot, mod) { return join(metaRoot(letheRoot), 'skills', cleanName(mod, 'Mod 名称')); }
 export function passivesMetaDir(letheRoot, mod) { return join(metaRoot(letheRoot), 'passives', cleanName(mod, 'Mod 名称')); }
@@ -295,6 +320,7 @@ function modulePath(letheRoot, id) { return join(modulesDir(letheRoot), safeModu
 export function ensureTestModules(letheRoot) {
   const dir = modulesDir(letheRoot);
   mkdirSync(dir, { recursive: true });
+  if (existsSync(join(dir, '.no-test-modules'))) return [];
   const created = [];
   TEST_MODULES.forEach((m, i) => {
     const p = modulePath(letheRoot, m.id);
@@ -307,17 +333,241 @@ export function ensureTestModules(letheRoot) {
   return created;
 }
 
+
+/* ------------------------------ 模块积木程序 ------------------------------ */
+const PROG_MAX_NODES = 400;
+const PROG_MAX_DEPTH = 8;
+const BLOCK_KINDS = new Set(['timing', 'loop', 'cons', 'if', 'ifnot', 'continueif', 'assign']);
+const LOGIC_KINDS = new Set(['none', 'and', 'or', 'xor']);
+const VALUE_KINDS = new Set(['acq', 'target', 'var', 'n', 's', 'math']);
+const MATH_OPS = new Set(['+', '-', '*', '%', '!', '¡', '?']);
+const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const TARGET_RE = /^[A-Za-z][A-Za-z0-9_]*(?:[+$][A-Za-z0-9_$]*)*$/;
+
+function pushValue(raw, depth, budget) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (++budget.nodes > PROG_MAX_NODES) throw new SafetyError('模块积木太多');
+  const t = String(raw.t || '');
+  if (!VALUE_KINDS.has(t)) return null;
+  if (t === 'acq') {
+    const n = canonicalCommand('acquirer', String(raw.n || ''));
+    if (!NAME_RE.test(n)) throw new SafetyError('获取函数名不合法：' + n);
+    const args = Array.isArray(raw.a) ? raw.a.map((x) => pushValue(x, depth + 1, budget)) : [];
+    return { t, n, a: args.slice(0, 10) };
+  }
+  if (t === 'math') {
+    const first = raw.first ? pushValue(raw.first, depth + 1, budget) : null;
+    const rawTail = Array.isArray(raw.tail) ? raw.tail.slice(0, 8) : [];
+    const tail = [];
+    for (const item of rawTail) {
+      if (!item || typeof item !== 'object') continue;
+      const op = String(item.op || '+');
+      if (!MATH_OPS.has(op)) throw new SafetyError('运算符不合法：' + op);
+      tail.push({ op, val: item.val ? pushValue(item.val, depth + 1, budget) : null });
+    }
+    return { t, first, tail };
+  }
+  if (t === 'target') {
+    const n = String(raw.n || '');
+    if (!TARGET_RE.test(n)) throw new SafetyError('目标选择器不合法：' + n);
+    const rawC = raw.c === null || raw.c === undefined ? '' : String(raw.c).trim();
+    let c = null;
+    if (rawC !== '') {
+      if (/^VALUE_\d+$/.test(rawC)) c = rawC;
+      else {
+        const num = Number(rawC);
+        if (!Number.isFinite(num)) throw new SafetyError('目标数量不合法：' + rawC);
+        c = Math.max(0, Math.min(999, Math.trunc(num)));
+      }
+    }
+    return { t, n, c };
+  }
+  if (t === 'var') {
+    const n = String(raw.n || '');
+    if (!/^VALUE_\d+$/.test(n)) throw new SafetyError('VALUE 变量不合法：' + n);
+    return { t, n };
+  }
+  if (t === 'n') {
+    const v = Number(raw.v);
+    if (!Number.isFinite(v)) throw new SafetyError('数值不合法');
+    return { t, v: Math.trunc(v) };
+  }
+  return { t, v: String(raw.v ?? '').slice(0, 200) };
+}
+
+function pushStmt(raw, depth, budget) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (depth > PROG_MAX_DEPTH) throw new SafetyError('模块积木层级过深');
+  if (++budget.nodes > PROG_MAX_NODES) throw new SafetyError('模块积木太多');
+  const k = String(raw.k || '');
+  if (!BLOCK_KINDS.has(k)) return null;
+  if (k === 'timing' || k === 'loop') {
+    const v = String(raw.v || '');
+    const re = k === 'loop' ? TARGET_RE : NAME_RE;
+    if (!re.test(v)) throw new SafetyError((k === 'loop' ? '循环目标不合法：' : '时点名不合法：') + v);
+    if (k === 'loop') return { k, v, body: Array.isArray(raw.body) ? raw.body.map((x) => pushStmt(x, depth + 1, budget)).filter(Boolean) : [] };
+    const fa = timingArgs(v);
+    const out = { k, v };
+    if (fa.includes('face')) out.face = ['None', 'Head', 'Tail'].includes(String(raw.face)) ? String(raw.face) : 'None';
+    if (fa.includes('crit')) out.crit = ['None', 'Crit', 'NoCrit'].includes(String(raw.crit)) ? String(raw.crit) : 'None';
+    if (fa.includes('keyword')) {
+      const kw = String(raw.kw || '').trim();
+      if (kw && !NAME_RE.test(kw)) throw new SafetyError('关键词不合法：' + kw);
+      if (kw) out.kw = kw;
+    }
+    if (fa.includes('key')) {
+      const key = String(raw.key || '').trim();
+      if (key && !NAME_RE.test(key)) throw new SafetyError('按键名不合法：' + key);
+      if (key) out.key = key;
+    }
+    if (raw.loop && typeof raw.loop === 'object') {
+      const ln = String(raw.loop.n || raw.loop.v || '');
+      if (!TARGET_RE.test(ln)) throw new SafetyError('遍历目标不合法：' + ln);
+      const rawC = raw.loop.c === null || raw.loop.c === undefined ? '' : String(raw.loop.c).trim();
+      let c = null;
+      if (rawC !== '') {
+        if (/^VALUE_\d+$/.test(rawC)) c = rawC;
+        else {
+          const num = Number(rawC);
+          if (!Number.isFinite(num)) throw new SafetyError('遍历数量不合法：' + rawC);
+          c = Math.max(0, Math.min(999, Math.trunc(num)));
+        }
+      }
+      out.loop = { t: 'target', n: ln, c };
+    } else {
+      out.loop = null;
+    }
+    out.body = Array.isArray(raw.body) ? raw.body.map((x) => pushStmt(x, depth + 1, budget)).filter(Boolean) : [];
+    return out;
+  }
+  if (k === 'assign') {
+    const v = String(raw.var || '');
+    if (!/^VALUE_\d+$/.test(v)) throw new SafetyError('VALUE 变量不合法：' + v);
+    return { k, var: v, val: raw.val ? pushValue(raw.val, depth + 1, budget) : null };
+  }
+  if (k === 'cons') {
+    const n = canonicalCommand('consequence', String(raw.n || ''));
+    if (!NAME_RE.test(n)) throw new SafetyError('函数名不合法：' + n);
+    const a = Array.isArray(raw.a) ? raw.a.map((x) => pushValue(x, depth + 1, budget)) : [];
+    return { k, n, a: a.slice(0, 12) };
+  }
+  // if / ifnot / continueif
+  const logic = LOGIC_KINDS.has(String(raw.logic)) ? String(raw.logic) : 'none';
+  const rawConds = Array.isArray(raw.conds) && raw.conds.length ? raw.conds : [{ left: raw.left, op: raw.op, right: raw.right }];
+  const conds = rawConds.slice(0, 8).map((c) => {
+    const cc = c || {};
+    const op = ['>', '<', '='].includes(String(cc.op)) ? String(cc.op) : '>';
+    return { left: pushValue(cc.left, depth + 1, budget), op, right: pushValue(cc.right, depth + 1, budget) };
+  });
+  const out = { k, logic, conds };
+  if (k !== 'continueif') out.body = Array.isArray(raw.body) ? raw.body.map((x) => pushStmt(x, depth + 1, budget)).filter(Boolean) : [];
+  return out;
+}
+
+/** 规范化并校验积木程序；非法结构抛 SafetyError */
+export function foldLegacyLoops(list) {
+  const out = [];
+  for (const b of list || []) {
+    if (!b) continue;
+    if (b.k === 'loop') {
+      const host = out.length ? out[out.length - 1] : null;
+      const body = Array.isArray(b.body) ? foldLegacyLoops(b.body) : [];
+      if (host && host.k === 'timing') {
+        host.loop = { t: 'target', n: String(b.v || 'Target'), c: null };
+        host.body = (host.body || []).concat(body);
+      } else if (body.length) {
+        out.push(...body);
+      }
+      continue;
+    }
+    if (Array.isArray(b.body)) b.body = foldLegacyLoops(b.body);
+    if (b.k === 'timing' && b.loop === undefined) b.loop = null;
+    out.push(b);
+  }
+  return out;
+}
+
+/** 规范化并校验积木程序；非法结构抛 SafetyError */
+export function normalizeProgram(raw) {
+  const budget = { nodes: 0 };
+  const blocks = Array.isArray(raw && raw.blocks) ? raw.blocks : [];
+  const out = foldLegacyLoops(blocks.map((x) => pushStmt(x, 0, budget)).filter(Boolean));
+  return { version: 1, blocks: out };
+}
+
+/** 统计程序里的语句块数量（给列表展示用） */
+export function countProgramBlocks(program) {
+  let n = 0;
+  const walk = (list) => {
+    for (const b of list || []) {
+      n++;
+      if (b && Array.isArray(b.body)) walk(b.body);
+    }
+  };
+  walk(program && program.blocks);
+  return n;
+}
+
+/** 写入模块积木程序（不进撤销栈，纯拖拽产物） */
+function denyProgramBlocks(scope, program) {
+  const bad = [];
+  const walkValue = (v) => {
+    if (!v || typeof v !== 'object') return;
+    if (v.t === 'acq') {
+      if (!commandAllowed(scope, String(v.n))) bad.push(String(v.n));
+      for (const x of v.a || []) walkValue(x);
+    }
+    if (v.t === 'math') { walkValue(v.first); for (const t of v.tail || []) walkValue(t.val); }
+  };
+  const walk = (list) => {
+    for (const b of list || []) {
+      if (!b) continue;
+      if (b.k === 'timing') { if (!timingAllowed(scope, String(b.v))) bad.push(String(b.v)); }
+      else if (b.k === 'cons') { if (!commandAllowed(scope, String(b.n))) bad.push(String(b.n)); for (const x of b.a || []) walkValue(x); }
+      else if (b.k === 'if' || b.k === 'ifnot' || b.k === 'continueif') {
+        for (const c of b.conds || []) { walkValue(c && c.left); walkValue(c && c.right); }
+      }
+      if (Array.isArray(b.body)) walk(b.body);
+    }
+  };
+  walk(program.blocks);
+  return [...new Set(bad)];
+}
+
+export function writeModuleProgram(letheRoot, id, program, opts = {}) {
+  const p = modulePath(letheRoot, id);
+  const doc = readJson(p, null);
+  if (!doc) throw new SafetyError('模块不存在');
+  if (opts.expectUpdatedAt && doc.updatedAt && String(doc.updatedAt) !== String(opts.expectUpdatedAt) && !opts.force) {
+    const conflict = new SafetyError('模块文件在磁盘上已被修改（可能是本机另一个窗口，或有人直接改了文件）');
+    conflict.status = 409;
+    throw conflict;
+  }
+  if (doc.test || doc.editable === false) throw new SafetyError('测试模块不可编辑');
+  const clean = normalizeProgram(program);
+  const legacy = doc.scope === undefined || doc.scope === null;
+  const scope = SCOPE_IDS.includes(doc.scope) ? doc.scope : 'common';
+  const bad = legacy ? [] : denyProgramBlocks(scope, clean);
+  if (bad.length) throw new SafetyError('「' + scopeZh(scope) + '」用途的模块不能使用：' + bad.join('、'));
+  const next = { ...doc, program: clean, blockCount: countProgramBlocks(clean), updatedAt: nowIso() };
+  writeFileAtomic(p, JSON.stringify(next, null, 2));
+  return moduleDocOf(next);
+}
+
 function moduleDocOf(doc) {
   return {
     id: String(doc.id),
     name: String(doc.name || doc.id),
     desc: String(doc.desc || ''),
-    prefix: String(doc.prefix || ''),
+    prefix: normalizePrefix(doc.prefix),
     kind: String(doc.kind || 'skill'),
+    scope: SCOPE_IDS.includes(doc.scope) ? doc.scope : 'common',
     test: Boolean(doc.test),
     editable: doc.editable !== false,
     createdAt: doc.createdAt || '',
     updatedAt: doc.updatedAt || doc.createdAt || '',
+    program: doc.program && Array.isArray(doc.program.blocks) ? doc.program : { version: 1, blocks: [] },
+    blockCount: Number(doc.blockCount || 0),
   };
 }
 
@@ -340,12 +590,13 @@ export function getModule(letheRoot, id) {
   return doc ? moduleDocOf(doc) : null;
 }
 
-export function createModule(letheRoot, { name, desc = '', prefix = '', kind = 'skill' }) {
+export function createModule(letheRoot, { name, desc = '', prefix = '', kind = 'skill', scope = 'common' }) {
   const n = String(name || '').trim();
   if (!n) throw new SafetyError('模块名称不能为空');
   const id = 'mod-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const at = nowIso();
-  const doc = { version: META_VERSION, id, name: n, desc: String(desc), prefix: String(prefix), kind: String(kind || 'skill'), test: false, editable: true, createdAt: at, updatedAt: at };
+  const sc = SCOPE_IDS.includes(scope) ? scope : 'common';
+  const doc = { version: META_VERSION, id, name: n, desc: String(desc), prefix: normalizePrefix(prefix), kind: String(kind || 'skill'), scope: sc, test: false, editable: true, createdAt: at, updatedAt: at };
   writeFileAtomic(modulePath(letheRoot, id), JSON.stringify(doc, null, 2));
   return moduleDocOf(doc);
 }
@@ -359,19 +610,24 @@ export function updateModule(letheRoot, id, patch = {}) {
     ...doc,
     name: patch.name !== undefined ? String(patch.name).trim() || doc.name : doc.name,
     desc: patch.desc !== undefined ? String(patch.desc) : doc.desc,
-    prefix: patch.prefix !== undefined ? String(patch.prefix) : (doc.prefix || ''),
+    prefix: patch.prefix !== undefined ? normalizePrefix(patch.prefix) : normalizePrefix(doc.prefix),
     kind: patch.kind !== undefined ? String(patch.kind) : (doc.kind || 'skill'),
+    scope: patch.scope !== undefined && SCOPE_IDS.includes(patch.scope) ? patch.scope : (SCOPE_IDS.includes(doc.scope) ? doc.scope : 'common'),
     updatedAt: nowIso(),
   };
   writeFileAtomic(p, JSON.stringify(next, null, 2));
   return moduleDocOf(next);
 }
 
-export function deleteModule(letheRoot, id) {
+export function deleteModule(letheRoot, id, opts = {}) {
   const p = modulePath(letheRoot, id);
   const doc = readJson(p, null);
   if (!doc) throw new SafetyError('模块不存在');
-  if (doc.test || doc.editable === false) throw new SafetyError('测试模块不可删除');
+  if (doc.test || doc.editable === false) {
+    if (!opts.allowTest) throw new SafetyError('测试模块不可删除');
+    mkdirSync(modulesDir(letheRoot), { recursive: true });
+    writeFileAtomic(join(modulesDir(letheRoot), '.no-test-modules'), String(nowIso()));
+  }
   unlinkSync(p);
   return { ok: true };
 }

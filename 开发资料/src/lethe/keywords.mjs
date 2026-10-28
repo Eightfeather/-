@@ -101,14 +101,21 @@ export function keywordTables(letheRoot) {
   // Buff：原版 bufList + 各 Mod 的 bufList/keywordList + custom_buffs 注册文件
   const buffNameIds = new Map();
   const buffIds = new Map();       // id -> zh（可空：custom_buffs 只有 id）
-  const addBuff = (id, name) => {
+  const buffNative = new Map();    // id -> 原文名（可能是韩文/英文，给没有中文名的 buff 兜底显示）
+  const buffSource = new Map();
+  const buffMod = new Map();
+  const addBuff = (id, name, source, modName) => {
     const key = String(id || '').trim();
     if (!key) return;
-    const zh = strip(name);
-    if (zh && !buffIds.has(key)) buffIds.set(key, zh);
+    if (!buffSource.has(key)) buffSource.set(key, source || 'vanilla');
+    if (modName && !buffMod.has(key)) buffMod.set(key, modName);
+    const raw = strip(name);
+    if (raw && !buffNative.has(key)) buffNative.set(key, raw);
+    const zh = hasCjk(raw) ? raw : '';
+    if (!buffIds.has(key)) buffIds.set(key, zh);
     if (zh) pushName(buffNameIds, zh, key);
   };
-  for (const e of entriesOf(readJsonSafe(join(en, 'bufList.json')))) addBuff(e.id, e.name);
+  for (const e of entriesOf(readJsonSafe(join(en, 'bufList.json')))) addBuff(e.id, e.name, 'vanilla');
 
   let modNames = [];
   try { modNames = readdirSync(join(letheRoot, 'mods'), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch {}
@@ -118,12 +125,12 @@ export function keywordTables(letheRoot) {
       const p = join(base, 'custom_limbus_locale', 'EN', dir);
       if (!existsSync(p)) continue;
       for (const f of readdirSync(p)) {
-        for (const e of entriesOf(readJsonSafe(join(p, f)))) addBuff(e.id, e.name);
+        for (const e of entriesOf(readJsonSafe(join(p, f)))) addBuff(e.id, e.name, 'mod', mod);
       }
     }
     const cb = join(base, 'custom_buffs');
     if (existsSync(cb)) {
-      for (const f of readdirSync(cb)) if (/\.txt$/i.test(f)) addBuff(f.replace(/\.txt$/i, ''), '');
+      for (const f of readdirSync(cb)) if (/\.txt$/i.test(f)) addBuff(f.replace(/\.txt$/i, ''), '', 'mod', mod);
     }
   }
 
@@ -144,9 +151,13 @@ export function keywordTables(letheRoot) {
     for (const f of readdirSync(p)) for (const e of entriesOf(readJsonSafe(join(p, f)))) addKw(e.id, e.name);
   }
 
+  const namedIds = new Set([...buffNameIds.values()].flat());
   const buffs = [...buffNameIds.entries()]
-    .map(([zh, ids]) => ({ zh, id: ids[0], ids }))
-    .sort((a, b) => a.zh.localeCompare(b.zh, 'zh'));
+    .map(([zh, ids]) => ({ zh, id: ids[0], ids, native: buffNative.get(ids[0]) || zh, source: buffSource.get(ids[0]) || 'vanilla', mod: buffMod.get(ids[0]) || '', panic: /(_panic|_lowmorale)/i.test(ids[0]) || /(_\u6050\u614c|_\u4f4e\u7406\u667a)/.test(zh) }))
+    .concat([...buffIds.keys()]
+      .filter((id) => !namedIds.has(id))
+      .map((id) => ({ zh: '', native: buffNative.get(id) || '', id, ids: [id], source: buffSource.get(id) || 'vanilla', mod: buffMod.get(id) || '', panic: /(_panic|_lowmorale)/i.test(id) })))
+    .sort((a, b) => String(a.zh || a.native || a.id).localeCompare(String(b.zh || b.native || b.id), 'zh'));
   const keywords = [...kwNameIds.entries()]
     .map(([zh, ids]) => ({ zh, id: ids[0], ids }))
     .sort((a, b) => a.zh.localeCompare(b.zh, 'zh'));
@@ -263,3 +274,22 @@ export function toGameText(text, tables) {
 }
 
 export function clearKeywordCache() { cache.clear(); }
+
+// 本 Mod 自定义 Buff 图标：custom_sprites/buffIcon_<id>.(png|webp)
+export function buffIconIndex(letheRoot) {
+  const map = new Map();
+  const rootMods = join(letheRoot, 'mods');
+  if (!existsSync(rootMods)) return map;
+  for (const name of readdirSync(rootMods)) {
+    const sp = join(rootMods, name, 'custom_sprites');
+    if (!existsSync(sp)) continue;
+    let files = [];
+    try { files = readdirSync(sp); } catch (_) { continue; }
+    for (const f of files) {
+      const m = /^buffIcon_(.+)\.(png|webp)$/i.exec(f);
+      if (!m) continue;
+      if (!map.has(m[1])) map.set(m[1], { mod: name, file: f });
+    }
+  }
+  return map;
+}

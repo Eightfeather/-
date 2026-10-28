@@ -1,9 +1,9 @@
 {
   "name": "the-lethe-workbench",
-  "version": "0.4.1",
+  "version": "0.6.7",
   "private": true,
   "type": "module",
-  "description": "The Lethe Workbench 路 杈圭嫳宸ヤ綔鍙帮紙Limbus Company / Lethe 绉佹湇 Mod 妗岄潰缂栬緫鍣級",
+  "description": "The Lethe Workbench 边狱工作台 · Limbus Company / Lethe 模组编辑器",
   "main": "src/main.mjs",
   "engines": {
     "node": ">=18.17"

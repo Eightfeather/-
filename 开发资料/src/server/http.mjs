@@ -60,7 +60,12 @@ export function readBody(req) {
 export function checkToken(req, token) {
   if (!token) return true;
   const got = req.headers['x-wb-token'];
-  return typeof got === 'string' && got === token;
+  if (typeof got === 'string' && got === token) return true;
+  try {
+    const u = new URL(String(req.url || '/'), 'http://127.0.0.1');
+    const q = u.searchParams.get('t');
+    return typeof q === 'string' && q === token;
+  } catch (_) { return false; }
 }
 
 const ALLOWED_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;

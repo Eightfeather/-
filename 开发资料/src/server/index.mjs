@@ -1,6 +1,8 @@
 import * as http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
+import { cleanName, resolveInside, safeRel } from '../safety.mjs';
 import { APP_ROOT, SRC_DIR } from '../paths.mjs';
 import { loadConfig } from '../config.mjs';
 import { locate } from '../locate.mjs';
@@ -10,7 +12,7 @@ import { EditSession } from '../lethe/session.mjs';
 import { AutoSaver } from '../lethe/autosave.mjs';
 import { markCleanExit, markRunning } from '../lethe/state.mjs';
 
-export const VERSION = '0.4.1';
+export const VERSION = '0.6.7';
 const WEB_ROOT = join(SRC_DIR, 'web');
 
 export function createServer({ token, state, log, session, autosave } = {}) {
@@ -24,6 +26,24 @@ export function createServer({ token, state, log, session, autosave } = {}) {
       const pathname = url.pathname;
 
       if (pathname === '/api/health') { sendJson(res, 200, { ok: true, app: 'The Lethe Workbench', version: VERSION }); return; }
+
+      if (pathname === '/api/sprite') {
+        if (!checkToken(req, token)) { sendJson(res, 401, { ok: false, error: '令牌无效' }); return; }
+        const mod = String(url.searchParams.get('mod') || '');
+        const file = String(url.searchParams.get('file') || '');
+        const ext = (file.split('.').pop() || '').toLowerCase();
+        if (!/^(png|webp|jpg|jpeg|gif)$/.test(ext)) { sendJson(res, 400, { ok: false, error: '不支持的图片类型' }); return; }
+        if (!state.letheRoot) { sendJson(res, 428, { ok: false, error: '还没有定位到私服' }); return; }
+        let abs;
+        try {
+          abs = resolveInside(join(state.letheRoot, 'mods'), join(cleanName(mod, 'Mod 名'), 'custom_sprites', safeRel(file)));
+        } catch (e) { sendJson(res, 400, { ok: false, error: e.message }); return; }
+        if (!existsSync(abs)) { sendJson(res, 404, { ok: false, error: 'not found' }); return; }
+        const buf = readFileSync(abs);
+        res.writeHead(200, { 'content-type': ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg', 'content-length': buf.length, 'cache-control': 'private, max-age=86400' });
+        res.end(buf);
+        return;
+      }
 
       if (pathname.startsWith('/api/')) {
         if (!checkToken(req, token)) { sendJson(res, 401, { ok: false, error: '令牌无效' }); return; }

@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "9os4zFZcrkg=",
+  "dgSpecHash": "N+Y9peIvU7g=",
   "success": true,
-  "projectFilePath": "E:\\辅助文件\\Mod编辑器\\编辑器正式稿V0.1\\开发资料\\host\\TheLetheWorkbench.csproj",
+  "projectFilePath": "E:\\辅助文件\\Mod编辑器\\编辑器正式稿\\开发资料\\host\\TheLetheWorkbench.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\31117\\.nuget\\packages\\microsoft.netframework.referenceassemblies\\1.0.3\\microsoft.netframework.referenceassemblies.1.0.3.nupkg.sha512",
     "C:\\Users\\31117\\.nuget\\packages\\microsoft.netframework.referenceassemblies.net48\\1.0.3\\microsoft.netframework.referenceassemblies.net48.1.0.3.nupkg.sha512"

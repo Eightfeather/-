@@ -84,6 +84,7 @@ console.log('[build-app] WebView2 运行时已就位');
 console.log('[build-app] 图标：' + makeIcon());
 const exe = buildHost();
 const ROOT_EXE = join(ROOT, '..', 'TheLetheWorkbench.exe');
-try { copyFileSync(exe, ROOT_EXE); } catch (e) { console.log('[build-app] 复制到项目根失败：' + e.message); }
+let copied = false;
+try { copyFileSync(exe, ROOT_EXE); copied = true; } catch (e) { console.log('[build-app] 复制到项目根失败（可能正在运行，请先关闭编辑器）：' + e.message); }
 console.log('[build-app] 完成：' + exe + ' (' + statSync(exe).size + ' B)');
-console.log('[build-app] 已复制到项目根：' + ROOT_EXE);
+if (copied) console.log('[build-app] 已复制到项目根：' + ROOT_EXE);

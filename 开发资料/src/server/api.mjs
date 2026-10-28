@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { ARG_COUNTS } from '../knowledge/arg-counts.mjs';
 import { join } from 'node:path';
 import { APP_ROOT, USER_DATA_DIR } from '../paths.mjs';
 import { configPath, rememberRoot, saveConfig } from '../config.mjs';
@@ -16,11 +17,15 @@ import {
   BUFF_CLASSES, BUFF_TYPES, COIN_COLORS, DEFAULT_BUFF_INFO, DEFAULT_INFO, DEFAULT_PASSIVE_INFO, MODULE_KINDS,
   PASSIVE_CONDITION_TYPES, PHYSICAL_TYPES, SIN_TYPES,
   createModule, deleteModule, getModule, listModules, readSkillMeta, readPassiveMeta, readBuffMeta,
-  updateModule, writeSkillCode, writeSkillMeta, writePassiveMeta, writeBuffMeta,
-} from '../lethe/meta.mjs';
+  updateModule, writeSkillCode, writeSkillMeta, writePassiveMeta, writeBuffMeta, writeModuleProgram } from '../lethe/meta.mjs';
 import { createPassive, getPassive, importPassives, listPassives, patchPassiveMeta, searchPassiveIndex } from '../lethe/passives.mjs';
 import { createBuff, getBuff, importBuffs, listBuffs, patchBuffMeta, searchBuffIndex } from '../lethe/buffs.mjs';
-import { analyzeDescription, keywordTables, toGameText } from '../lethe/keywords.mjs';
+import { analyzeDescription, buffIconIndex, keywordTables, toGameText } from '../lethe/keywords.mjs';
+import { TIMING_ARGS } from '../knowledge/timing-args.mjs';
+import { ARG_ENUMS } from '../knowledge/arg-enums.mjs';
+import { ARG_OPTIONAL } from '../knowledge/arg-optional.mjs';
+import { COMMANDS, ACQUIRERS, CONSEQUENCES, modularStats } from '../knowledge/modular-tables.mjs';
+import { SCOPES, TIMING_SCOPE, COMMAND_SCOPE, TIMING_CONTAINERS, COMMAND_CONTAINERS } from '../knowledge/scopes.mjs';
 import { createApi } from './api-shared.mjs';
 
 export function buildApi(ctx) {
@@ -326,6 +331,28 @@ export function buildApi(ctx) {
     },
 
     /* ---------- 技能编辑（v0.3） ---------- */
+    'GET /api/modular-tables': (q) => {
+      const kind = String(q.get('kind') || '').trim();
+      const text = String(q.get('q') || '').trim().toLowerCase();
+      let rows = COMMANDS;
+      if (kind === 'consequence' || kind === 'acquirer') rows = rows.filter((c) => c.kind === kind);
+      if (text) {
+        rows = rows.filter((c) =>
+          c.name.toLowerCase().includes(text) ||
+          String(c.cls || '').toLowerCase().includes(text) ||
+          String(c.summary || '').toLowerCase().includes(text));
+      }
+      return {
+        ok: true,
+        stats: modularStats(),
+        counts: { consequences: CONSEQUENCES.length, acquirers: ACQUIRERS.length },
+        rows: rows.map((c) => ({
+          kind: c.kind, name: c.name, zh: c.zh, cls: c.cls, sig: c.sig, args: c.args,
+            aliasOf: c.aliasOf || [],
+          summary: c.summary, params: c.params,
+        })),
+      };
+    },
     'GET /api/keywords': () => {
       const { letheRoot } = need();
       const t = keywordTables(letheRoot);
@@ -335,7 +362,14 @@ export function buildApi(ctx) {
         displayTimings: t.displayTimings,
         tags: t.tags,
         sins: t.sins,
-        buffs: t.buffs,
+        buffs: (() => {
+          const icons = buffIconIndex(letheRoot);
+          return t.buffs.map((b) => {
+            const ids = Array.isArray(b.ids) ? b.ids : (b.id ? [b.id] : []);
+            const hit = ids.map((x) => icons.get(String(x))).find(Boolean) || null;
+            return hit ? Object.assign({}, b, { icon: hit }) : b;
+          });
+        })(),
         keywords: t.keywords.map((x) => ({ id: x.id, zh: x.zh })),
         stats: t.stats,
         physical: PHYSICAL_TYPES,
@@ -347,6 +381,8 @@ export function buildApi(ctx) {
         moduleKinds: MODULE_KINDS,
         passiveDefaults: DEFAULT_PASSIVE_INFO,
         buffDefaults: DEFAULT_BUFF_INFO,
+        timingArgs: TIMING_ARGS, argEnums: ARG_ENUMS,
+      argOptional: ARG_OPTIONAL, argCounts: ARG_COUNTS,
       };
     },
 
@@ -446,6 +482,8 @@ export function buildApi(ctx) {
 
 
     /* ---------- 模块编辑（v0.4） ---------- */
+      'GET /api/scopes': () => ({ ok: true, scopes: SCOPES, timingScope: TIMING_SCOPE, commandScope: COMMAND_SCOPE, timingContainers: TIMING_CONTAINERS, commandContainers: COMMAND_CONTAINERS }),
+
     'GET /api/modules': () => {
       const { letheRoot } = need();
       return { ok: true, modules: listModules(letheRoot) };
@@ -460,19 +498,25 @@ export function buildApi(ctx) {
 
     'POST /api/module/create': (body) => {
       const { letheRoot } = need();
-      const one = createModule(letheRoot, { name: body.name, desc: body.desc, prefix: body.prefix, kind: body.kind });
+      const one = createModule(letheRoot, { name: body.name, desc: body.desc, prefix: body.prefix, kind: body.kind, scope: body.scope });
       return { ok: true, module: one };
     },
 
     'POST /api/module/save': (body) => {
       const { letheRoot } = need();
-      const one = updateModule(letheRoot, body.id, { name: body.name, desc: body.desc, prefix: body.prefix, kind: body.kind });
+      const one = updateModule(letheRoot, body.id, { name: body.name, desc: body.desc, prefix: body.prefix, kind: body.kind, scope: body.scope });
+      return { ok: true, module: one };
+    },
+
+    'POST /api/module/program': (body) => {
+      const { letheRoot } = need();
+      const one = writeModuleProgram(letheRoot, body.id, body.program, { expectUpdatedAt: body.expectUpdatedAt, force: !!body.force });
       return { ok: true, module: one };
     },
 
     'POST /api/module/delete': (body) => {
       const { letheRoot } = need();
-      return { ok: true, ...deleteModule(letheRoot, body.id) };
+      return { ok: true, ...deleteModule(letheRoot, body.id, { allowTest: !!body.allowTest }) };
     },
 
     /* ---------- 被动编辑（v0.4） ---------- */

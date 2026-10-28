@@ -1050,6 +1050,7 @@ async function checkRecover() {
 document.addEventListener('click', (e) => {
   const nav = e.target.closest('[data-view]');
   if (nav && (nav.classList.contains('dock-item') || nav.classList.contains('nav-key'))) {
+    if (mbIsDirty() || mbPendingMissing().list.length) { mbLeaveGuard(() => { S.view = nav.dataset.view; S.moduleEditing = null; S.mb = null; S.mbDoc = null; render(); }); return; }
     S.view = nav.dataset.view;
     if (S.view === 'mods' && S.status?.letheRoot) loadModDetail(S.selected).then(() => render()).catch(() => render());
     else render();
@@ -1074,6 +1075,7 @@ document.addEventListener('input', (e) => {
   if (t.id === 'passive-search') { S.passiveSearch = t.value; render(); refocus('passive-search', t.value.length); return; }
   if (t.id === 'buff-search') { S.buffSearch = t.value; render(); refocus('buff-search', t.value.length); return; }
   if (t.id === 'module-search2') { S.moduleSearch2 = t.value; render(); refocus('module-search2', t.value.length); return; }
+  if (t.id === 'mb-search') { S.mb.search = t.value; render(); refocus('mb-search', t.value.length); return; }
   if (t.dataset && t.dataset.pinfo) { schedulePInfo(); return; }
   if (t.dataset && t.dataset.binfo) { scheduleBInfo(); return; }
   if (t.dataset && t.dataset.info) { scheduleInfo(); }
@@ -1423,6 +1425,17 @@ function descCheckHtml(st) {
       : '✓ 关键词检查通过（' + okCount + ' 个）')
     + '</div>';
 }
+function descKwListHtml() {
+  const timings = (S.keywords && S.keywords.timings) || [];
+  const buffs = (S.keywords && S.keywords.buffs) || [];
+  const items = timings.map((t) => String(t.zh || '').trim()).filter(Boolean)
+    .concat(buffs.map((b) => String(b.zh || '').trim()).filter(Boolean));
+  const uniq = Array.from(new Set(items));
+  return '<datalist id="desc-kw-list">' + uniq.map((x) => '<option value="' + esc(x) + '">').join('') + '</datalist>';
+}
+function descKwToolsHtml() {
+  return '<div class="desc-tools"><input id="desc-kw" list="desc-kw-list" class="mb-logic" placeholder="关键词中文名（时点 / Buff）"><button class="btn ghost sm" data-act="desc-kw-insert">插入到光标处</button><span class="muted">插入后会写成 [关键词]，保存时转成游戏英文 id</span></div>';
+}
 function renderSkillDesc(sk) {
   const text = descTextOf(sk);
   const st = descStateOf('skill');
@@ -1441,13 +1454,14 @@ function renderSkillDesc(sk) {
   const gameAll = [st.game || '', ...Array.from({ length: n }, (_, i) => descStateOf('coin', i).game || '')].filter(Boolean).join('\n');
   return '<div class="desc-wrap">'
     + '<div class="desc-block"><div class="desc-block-head"><strong>技能描述</strong><span class="muted">技能本体（非硬币）的说明文本，用 [关键词] 书写</span></div>'
+    + descKwToolsHtml()
     + '<textarea id="skill-desc" class="desc-input" spellcheck="false" rows="6" placeholder="例如：[使用时]使本技能的硬币威力+1">' + esc(text) + '</textarea>'
     + '<div class="desc-preview" id="desc-preview">' + highlightText(text, st.tokens || []) + '</div>'
     + '<div id="desc-check">' + descCheckHtml(st) + '</div></div>'
     + '<div class="desc-block"><div class="desc-block-head"><strong>硬币描述</strong><span class="muted">数量跟随「硬币数量」，每枚硬币一段</span></div>'
     + '<div class="coin-desc-grid">' + (coins.join('') || '<div class="muted" style="padding:8px 2px">当前技能还没有硬币；把「硬币数量」调到 1 以上即可</div>') + '</div></div>'
     + '<details class="game-text"><summary>游戏内文本预览（关键词已转为英文 id）</summary><pre id="game-text">' + esc(gameAll) + '</pre></details>'
-    + '<div class="hint muted">描述改动在停止输入后写入磁盘并记入撤销历史；代码区（拖拽）不进撤销。</div></div>';
+    + '<div class="hint muted">描述改动在停止输入后写入磁盘并记入撤销历史；代码区（拖拽）不进撤销。</div></div>' + descKwListHtml();
 }
 let descTimer = null;
 let coinTimer = null;
@@ -1912,8 +1926,9 @@ function renderModulePanel(searchId, value) {
 /* ------------------------------ 模块编辑 ------------------------------ */
 
 function renderModuleArea(back) {
+  if (S.moduleEditing && S.mb && S.mbDoc) return renderModuleEditor(back);
   const rows = (S.modules || []).map((m) => '<button class="item ' + (S.moduleEditing === m.id ? 'active' : '') + '" data-act="open-module" data-id="' + esc(m.id) + '">'
-    + '<div class="item-main"><strong>' + esc(m.name || m.id) + '</strong><small>' + esc(m.id) + (m.test ? ' · 测试' : '') + '</small></div></button>').join('');
+    + '<div class="item-main"><strong>' + esc(m.name || m.id) + '</strong><small>' + esc(m.id) + (m.test ? ' · 测试' : '') + (m.blockCount ? ' · ' + m.blockCount + ' 块' : '') + '</small></div></button>').join('');
   return '<div class="pane-head">' + back + '<div><h2>模块编辑</h2><p class="muted">可执行词条块 · 由技能 / 被动 / Buff 引用</p></div></div>'
     + '<div class="module-wrap"><section class="panel"><div class="panel-head">模块 <span class="count">' + (S.modules || []).length + '</span></div>'
     + '<div class="panel-body list">' + (rows || '<div class="list-empty">还没有模块</div>') + '</div>'
@@ -1927,23 +1942,1637 @@ function renderModuleForm() {
     return '<section class="panel"><div class="panel-body"><div class="empty-state"><div class="empty-mark">▤</div><p>从左侧选一个模块</p><small class="muted">或新建模块</small></div></div></section>';
   }
   const timings = S.keywords?.timings || [];
-  const kinds = S.keywords?.moduleKinds || [{ id: 'skill', zh: '技能' }, { id: 'passive', zh: '被动' }, { id: 'buff', zh: 'Buff' }];
+  const scopes = (S.scopeTables && S.scopeTables.list) || [{ id: 'common', zh: '通用', desc: '' }];
   const opt = (arr, v) => arr.map((x) => '<option value="' + esc(x.id) + '"' + (String(x.id) === String(v) ? ' selected' : '') + '>' + esc(x.zh || x.id) + '</option>').join('');
+  const timingValue = (v) => {
+    const raw = String(v || '');
+    if (!raw) return '';
+    const byId = timings.find((x) => String(x.id) === raw);
+    return byId ? byId.en : raw;
+  };
+  const timingOpt = timings.map((x) => {
+    const val = x.en || String(x.id);
+    const sel = val.toLowerCase() === timingValue(m.prefix).toLowerCase() ? ' selected' : '';
+    const label = x.zh ? x.zh + ' · ' + x.en : x.en;
+    return '<option value="' + esc(val) + '"' + sel + '>' + esc(label) + '</option>';
+  }).join('');
   const ro = m.test ? ' disabled' : '';
   return '<section class="panel module-form"><div class="panel-head"><strong>' + esc(m.name || m.id) + '</strong><span class="spacer"></span>'
-    + (m.test ? '<span class="tag warn">测试模块 · 只读</span>' : '<button class="btn ok sm" data-act="save-module">保存</button><button class="btn danger sm" data-act="delete-module">删除</button>')
+    + (m.test ? '<span class="tag warn">测试模块 · 只读</span><button class="btn danger sm" data-act="delete-module">删除测试模块</button>' : '<button class="btn ok sm" data-act="save-module">保存</button><button class="btn danger sm" data-act="delete-module">删除</button>')
     + '</div><div class="panel-body"><div class="form">'
     + '<label class="field"><span>模块名称</span><input id="mod-name" value="' + esc(m.name || '') + '"' + ro + '></label>'
     + '<div class="grid-2">'
-    + '<label class="field"><span>所属前缀（时点）</span><select id="mod-prefix"' + ro + '><option value="">（未指定）</option>' + opt(timings, m.prefix) + '</select></label>'
-    + '<label class="field"><span>适用类型</span><select id="mod-kind"' + ro + '>' + opt(kinds, m.kind) + '</select></label>'
+    + '<label class="field"><span>所属前缀（时点）</span><select id="mod-prefix"' + ro + '><option value="">（未指定）</option>' + timingOpt + '</select></label>'
+    + '<label class="field"><span>用途</span><select id="mod-scope"' + ro + '>' + scopes.map((k) => '<option value="' + esc(k.id) + '"' + (String(k.id) === String(m.scope || 'common') ? ' selected' : '') + '>' + esc(k.zh) + '</option>').join('') + '</select></label>'
     + '</div>'
     + '<label class="field"><span>模块描述（可执行词条）</span><textarea id="mod-desc" class="desc-input" rows="6" spellcheck="false"' + ro + ' placeholder="例如：[使用时]若目标的[烧伤]强度与[震颤]强度之和不低于6级，则使本技能的硬币威力+1">' + esc(m.desc || '') + '</textarea></label>'
     + '<div class="hint muted">改动点「保存」后写入模块库；测试模块不可修改与删除。</div>'
     + '</div></div></section>';
 }
 
-/* ------------------------------ 被动编辑 ------------------------------ */
+/* ============================ 模块积木编辑器（Scratch 式） ============================ */
+
+const MB_TARGETS = [
+  // 单目标（教程「目标参数 / 单目标」）
+  { n: 'Self', zh: '自身', g: 'single' },
+  { n: 'SelfCore', zh: '自身核心（部位取其本体）', g: 'single' },
+  { n: 'Target', zh: '当前目标', g: 'single' },
+  { n: 'TargetCore', zh: '当前目标的核心', g: 'single' },
+  { n: 'MainTarget', zh: '主目标', g: 'single' },
+  { n: 'Victim', zh: '受害者', g: 'single' },
+  { n: 'Killer', zh: '击杀者', g: 'single' },
+  { n: 'adjLeft', zh: '左侧相邻单位', g: 'single' },
+  { n: 'adjRight', zh: '右侧相邻单位', g: 'single' },
+  // 多目标
+  { n: 'EveryTarget', zh: '所有目标', g: 'multi' },
+  { n: 'SubTarget', zh: '副目标（技能命中列表）', g: 'multi' },
+  { n: 'EveryAlly', zh: '所有友方', g: 'multi' },
+  { n: 'EveryEnemy', zh: '所有敌方', g: 'multi' },
+  { n: 'EveryCoreAlly', zh: '所有友方（含本体）', g: 'multi' },
+  { n: 'EveryCoreEnemy', zh: '所有敌方（含本体）', g: 'multi' },
+  { n: 'EveryAbnoCoreAlly', zh: '所有友方异想体', g: 'multi' },
+  { n: 'EveryAbnoCoreEnemy', zh: '所有敌方异想体', g: 'multi' },
+  { n: 'All', zh: '所有上场单位', g: 'multi' },
+  { n: 'SkillTargets', zh: '本技能的目标列表', g: 'multi' },
+  { n: 'SkillSubTargets', zh: '本技能的副目标列表', g: 'multi' },
+  // 修饰标签（用 + 连接到基础选择器后）
+  { n: 'Ally', zh: '仅友方', g: 'tag' },
+  { n: 'Enemy', zh: '仅敌方', g: 'tag' },
+  { n: 'NoAbnos', zh: '排除异想体', g: 'tag' },
+  { n: 'AbnoOnly', zh: '只要异想体', g: 'tag' },
+  { n: 'NoCores', zh: '排除核心', g: 'tag' },
+  { n: 'NoParts', zh: '排除部位', g: 'tag' },
+  { n: 'Assist', zh: '包含支援单位', g: 'tag' },
+  { n: 'ExceptSelf', zh: '排除自身', g: 'tag' },
+  { n: 'ExceptTarget', zh: '排除当前目标', g: 'tag' },
+  { n: 'Random', zh: '随机排序', g: 'tag' },
+  { n: 'Deploy', zh: '按上场顺序排序', g: 'tag' },
+  { n: 'Reversedeploy', zh: '按登场逆序排序', g: 'tag' },
+  { n: 'Slowest', zh: '最慢优先', g: 'tag' },
+  { n: 'Fastest', zh: '最快优先', g: 'tag' },
+  { n: 'HighestHPRatio', zh: 'HP 比例最高优先', g: 'tag' },
+  { n: 'LowestHPRatio', zh: 'HP 比例最低优先', g: 'tag' },
+  { n: 'HighestHP', zh: 'HP 最高优先', g: 'tag' },
+  { n: 'LowestHP', zh: 'HP 最低优先', g: 'tag' },
+  { n: 'HighestMaxHP', zh: '最大 HP 最高优先', g: 'tag' },
+  { n: 'LowestMaxHP', zh: '最大 HP 最低优先', g: 'tag' },
+  { n: 'HighestMP', zh: 'SP 最高优先', g: 'tag' },
+  { n: 'LowestMP', zh: 'SP 最低优先', g: 'tag' },
+  { n: 'Deads', zh: '只取已阵亡单位', g: 'tag' },
+  { n: 'Retreats', zh: '只取已撤退单位', g: 'tag' },
+];
+const MB_TARGET_TAGS = MB_TARGETS.filter((t) => t.g === 'tag');
+const MB_TAG_SET = new Set(MB_TARGET_TAGS.map((t) => t.n));
+const MB_TYPE_ZH = { target: '目标', buff: 'Buff 关键词', num: '整数', var: 'VALUE 寄存器', op: '运算符', text: '文本', any: '任意' };
+// 常见函数的参数类型（下标从 0 起）；未列出的按文档关键词推断
+const MB_ARG_OVERRIDES = {
+  'consequence:buff': ['target', 'buff', 'num', 'num', 'num', 'text'],
+  'consequence:healhp': ['target', 'num'],
+  'consequence:healsp': ['target', 'num'],
+  'consequence:gainshield': ['target', 'num'],
+  'consequence:consume-buff': ['target', 'buff', 'num'],
+  'consequence:modify-power': ['target', 'num'],
+  'consequence:modify-damage': ['target', 'num'],
+  'consequence:scale': ['num', 'op', 'num'],
+  'consequence:base': ['num'],
+  'consequence:final': ['num'],
+  'consequence:clash': ['num'],
+  'consequence:dmgadd': ['num'],
+  'consequence:skillreuse': ['target'],
+  'consequence:insertskill': ['target', 'text'],
+  'consequence:setmaxhp': ['target', 'num'],
+  'consequence:changecolor': ['target', 'text', 'text', 'text'],
+  'acquirer:getbuff': ['target', 'buff', 'text', 'text', 'text'],
+  'acquirer:getbuffcount': ['target', 'buff'],
+  'acquirer:resource': ['num', 'num', 'num'],
+  'acquirer:gbturn': ['target', 'buff'],
+  'acquirer:stack': ['target', 'buff'],
+  'acquirer:turn': ['target', 'buff'],
+  'acquirer:getskillid': [],
+  'acquirer:gbstack': ['text'],
+};
+
+function mbArgType(kind, name, i) {
+  const ov = MB_ARG_OVERRIDES[kind + ':' + name];
+  if (ov && ov[i]) return ov[i];
+  const row = (S.mbTables || []).find((r) => r.kind === kind && r.name === name);
+  const doc = row && row.params && row.params[i] ? String(row.params[i].doc || '') : '';
+  if (/目标|多目标/.test(doc)) return 'target';
+  if (/[Bb]uff\s*关键词|关键词/.test(doc)) return 'buff';
+  if (/\bADD\b|\bSUB\b|\bMUL\b/.test(doc)) return 'op';
+  if (/\buse\b|文本|名称|字符串/.test(doc)) return 'text';
+  if (/整数|数值|数量|层数|强度|回合|倍率|%/.test(doc)) return 'num';
+  return 'any';
+}
+
+function mbValueType(node) {
+  if (!node) return 'empty';
+  if (node.t === 'target') return 'target';
+  if (node.t === 'var') return 'var';
+  if (node.t === 'n') return 'num';
+  if (node.t === 's') return 'text';
+  if (node.t === 'acq') return 'acq';
+  if (node.t === 'math') return 'num';
+  return 'any';
+}
+
+function mbCompatible(slotType, valueType) {
+  const t = slotType || 'any';
+  if (t === 'any') return true;
+  if (t === 'num') return valueType === 'num' || valueType === 'var' || valueType === 'acq';
+  if (t === 'target') return valueType === 'target';
+  if (t === 'buff') return valueType === 'text' || valueType === 'any';
+  if (t === 'op') return valueType === 'text';
+  if (t === 'text') return valueType === 'text' || valueType === 'num';
+  return true;
+}
+
+function mbSlotType(chain) {
+  const all = String(chain || '').split(':');
+  const stmt = mbStmt(all[0]);
+  if (!stmt) return 'any';
+  const last = all[all.length - 1];
+  const prev = all[all.length - 2] || '';
+  if (/^a(\d+)$/.test(last)) return mbArgType('consequence', stmt.n, Number(RegExp.$1));
+  if (last === 'val') return 'num';
+  if (last === 'loop') return 'target';
+  if (last === 'left' || last === 'right') return 'num';
+  if (last === 'op') return 'op';
+  if (/^c\d+$/.test(last)) return 'any';
+  return 'any';
+}
+const MB_VARS = Array.from({ length: 10 }, (_, i) => 'VALUE_' + i);
+const MB_MATH_OPS = [['+', '加 +'], ['-', '减 -'], ['*', '乘 *'], ['%', '除 %'], ['!', '取小 !'], ['¡', '取大 ¡'], ['?', '取余 ?']];
+
+function mbTargetZh(n) { return (MB_TARGETS.find((t) => t.n === n) || {}).zh || n; }
+function mbTargetLabel(v) {
+  if (!v) return '';
+  const c = v.c === null || v.c === undefined || v.c === '' ? '' : String(v.c);
+  const parts = String(v.n || '').split('+');
+  const label = parts.map((x) => mbTargetZh(x) || x).join(' + ');
+  return label + (c ? ' × ' + c : '');
+}
+
+async function loadModularTables() {
+  if (S.mbTablesReady) return S.mbTables;
+  const res = await api('/api/modular-tables');
+  S.mbTables = res.rows || [];
+  S.mbTablesReady = true;
+  return S.mbTables;
+}
+
+function mbRows(kind) { return (S.mbTables || []).filter((r) => r.kind === kind); }
+
+async function ensureScopes() {
+  if (S.scopeTables) return S.scopeTables;
+  try {
+    const res = await api('/api/scopes');
+    S.scopeTables = { list: res.scopes || [], timing: res.timingContainers || {}, command: res.commandContainers || {}, timingScope: res.timingScope || {}, commandScope: res.commandScope || {} };
+  } catch (e) {
+    S.scopeTables = { list: [{ id: 'common', zh: '通用' }], timing: {}, command: {} };
+  }
+  return S.scopeTables;
+}
+
+function curScope() {
+  return (S.mbDoc && S.mbDoc.scope) || 'common';
+}
+
+function scopeAllowsOne(map, key) {
+  const set = map ? map[String(key)] : undefined;
+  if (!set || !set.length) return true;
+  const has = (k) => set.includes(k) || set.includes("unit");
+  const scope = curScope();
+  if (scope === "common") return ["buff", "passive", "skill"].every(has);
+  return has(scope);
+}
+
+function scopeAllowsTiming(en) {
+  return scopeAllowsOne(S.scopeTables && S.scopeTables.timing, en);
+}
+
+function scopeAllowsCommand(name) {
+  return scopeAllowsOne(S.scopeTables && S.scopeTables.command, name);
+}
+
+function scopeZhOf(id) {
+  const one = (S.scopeTables && S.scopeTables.list ? S.scopeTables.list : []).find((x) => x.id === id);
+  return one ? one.zh : '通用';
+}
+
+async function openModuleEditor(id) {
+  await ensureScopes();
+  await ensureKeywords();
+  const res = await api('/api/module?id=' + encodeURIComponent(id));
+  await loadModularTables();
+  const doc = res.module;
+  S.moduleEditing = id;
+  S.mbDoc = doc;
+  S.mb = {
+    program: { version: 1, blocks: mbMigrateLegacy(mbNestFlat(doc.program && Array.isArray(doc.program.blocks) ? doc.program.blocks : [])) }, sel: null,
+    search: '', cat: 'timing', carry: null, drag: null, showProps: false, showScript: false,
+    showMissing: false, missingIds: null,
+    hist: [], redo: [], savedAt: doc.updatedAt || '', forceSave: false,
+  };
+  render();
+}
+
+/* ---------------- 取路径 ---------------- */
+
+function selCls(idStr) {
+  return S.mb && S.mb.sel === idStr ? ' sel' : '';
+}
+
+function mbDeepHost(list) {
+  let host = null;
+  let cur = list;
+  while (cur && cur.length) {
+    const last = cur[cur.length - 1];
+    if (!last || (last.k !== 'timing' && last.k !== 'loop')) break;
+    host = last;
+    cur = last.body;
+  }
+  return host;
+}
+
+function mbMigrateLegacy(list) {
+  const out = [];
+  for (const raw of list || []) {
+    if (!raw) continue;
+    const b = raw;
+    if (b.k === 'loop') {
+      const host = out.length ? out[out.length - 1] : null;
+      const body = Array.isArray(b.body) ? mbMigrateLegacy(b.body) : [];
+      if (host && host.k === 'timing') {
+        host.loop = { t: 'target', n: String(b.v || 'Target'), c: null };
+        host.body = (host.body || []).concat(body);
+      } else if (body.length) {
+        out.push(...body);
+      }
+      continue;
+    }
+    if (b.k === 'if' || b.k === 'ifnot' || b.k === 'continueif') {
+      if (!Array.isArray(b.conds) || !b.conds.length) b.conds = [{ left: b.left || null, op: b.op || '>', right: b.right || null }];
+      delete b.left; delete b.right; delete b.op;
+      if (!['none', 'and', 'or', 'xor'].includes(b.logic)) b.logic = 'none';
+    }
+    if (Array.isArray(b.body)) b.body = mbMigrateLegacy(b.body);
+    out.push(b);
+  }
+  return out;
+}
+function mbNestFlat(list) {
+  const out = [];
+  for (const raw of list || []) {
+    const b = JSON.parse(JSON.stringify(raw));
+    if (b.k === 'timing') {
+      b.body = mbNestFlat(Array.isArray(b.body) ? b.body : []);
+      out.push(b);
+      continue;
+    }
+    if (b.k === 'loop' || b.k === 'if') {
+      b.body = mbNestFlat(Array.isArray(b.body) ? b.body : []);
+      const h = mbDeepHost(out);
+      if (h) h.body.push(b); else out.push(b);
+      continue;
+    }
+    const host = mbDeepHost(out);
+    if (host) host.body.push(b); else out.push(b);
+  }
+  return out;
+}
+
+function mbBackspace() {
+  const sel = S.mb && S.mb.sel;
+  if (!sel) return;
+  const p = String(sel).split('.').map(Number);
+  const parent = mbStackAt(p.slice(0, -1));
+  if (!parent || !parent[p[p.length - 1]]) { S.mb.sel = null; render(); return; }
+  if (p.length === 1) {
+    parent.splice(p[0], 1);
+    S.mb.sel = null;
+    render();
+    toast('\u5df2\u5220\u9664\u8be5\u4ee3\u7801\u5757', 'warn');
+    return;
+  }
+  const node = parent.splice(p[p.length - 1], 1)[0];
+  const hatPath = p.slice(0, -2);
+  const hatIdx = p[p.length - 2];
+  const hatStack = mbStackAt(hatPath);
+  if (!hatStack) { render(); return; }
+  hatStack.splice(hatIdx + 1, 0, node);
+  S.mb.sel = (hatPath.length ? hatPath.join('.') + '.' : '') + (hatIdx + 1);
+  render();
+  toast('\u5df2\u53d6\u6d88\u4e00\u7ea7\u7f29\u8fdb', 'info');
+}
+
+function mbStackAt(pathArr) {
+  let list = S.mb.program.blocks;
+  for (const idx of pathArr) {
+    const node = list && list[idx];
+    if (!node) return null;
+    if (!Array.isArray(node.body)) {
+      if (node.k === 'if' || node.k === 'timing' || node.k === 'loop') node.body = [];
+      else return null;
+    }
+    list = node.body;
+  }
+  return list;
+}
+function mbStmt(idStr) {
+  const p = String(idStr || '').split('.').filter((x) => x !== '').map(Number);
+  if (!p.length) return null;
+  return mbStackAt(p.slice(0, -1))?.[p[p.length - 1]] || null;
+}
+
+/* ---------------- 渲染 ---------------- */
+
+function mbValHtml(v, chain, slotType, opt) {
+  const st = slotType || 'any';
+  const stAttr = ' data-slot-type="' + esc(st) + '" title="' + esc((MB_TYPE_ZH[st] || MB_TYPE_ZH.any) + (opt ? ' · 可选参数，可留空' : '')) + '"';
+  if (!v) return '<span class="slot' + (opt ? ' slot-opt' : '') + ' slot-t-' + esc(st) + '"' + stAttr + ' data-mb-empty="1" data-mb-slot="' + esc(chain) + '"><i><b class="' + (opt ? 'slot-flag-opt">可选' : 'slot-flag-req">必填') + '</b>' + esc(MB_TYPE_ZH[st] || '.') + '</i></span>';
+  const inner = (() => {
+    if (v.t === 'target') return esc(mbTargetLabel(v));
+    if (v.t === 'var') return esc(v.n);
+    if (v.t === 'n') return esc(String(v.v));
+    if (v.t === 's') return '"' + esc(String(v.v)) + '"';
+    if (v.t === 'acq') {
+      const args = (v.a || []).map((x, i) => mbArgHtml(x, chain + '>' + i, mbArgType('acquirer', v.n, i), 'acquirer', v.n, i)).join('<span class="vb-comma">,</span>');
+      return esc(v.n) + '(' + args + ')';
+    }
+    if (v.t === 'math') {
+      let html = '<span class="vb-math-op">math(</span>' + mbValHtml(v.first, chain + '>f', 'num');
+      for (let i = 0; i < (v.tail || []).length; i++) {
+        const t = v.tail[i];
+        html += '<select class="mb-mathop" data-mb-mathop="' + esc(chain) + '" data-mb-idx="' + i + '">'
+          + MB_MATH_OPS.map(([o, label]) => '<option value="' + o + '"' + (o === (t.op || '+') ? ' selected' : '') + '>' + esc(label) + '</option>').join('')
+          + '</select>' + mbValHtml(t.val, chain + '>t' + i, 'num');
+      }
+      html += '<span class="vb-math-op">)</span>'
+        + '<button class="vb-edit" data-mb-mathadd="' + esc(chain) + '" title="加一项">＋</button>'
+        + '<button class="vb-edit" data-mb-mathdel="' + esc(chain) + '" title="去掉最后一项">－</button>';
+      return html;
+    }
+    return esc(JSON.stringify(v));
+  })();
+  const edit = v.t === 'n' ? '<button class="vb-edit" data-mb-edit="' + esc(chain) + '" title="修改数字">✎</button>' : '';
+  const vt = mbValueType(v);
+  return '<span class="vb vb-' + esc(v.t) + ' vb-t-' + esc(vt) + '" data-chain="' + esc(chain) + '" data-mb-slot="' + esc(chain) + '"' + stAttr + '>' + inner + edit + '</span>';
+}
+
+function mbCondsOf(b) {
+  if (b && Array.isArray(b.conds) && b.conds.length) return b.conds;
+  if (b && (b.left !== undefined || b.right !== undefined)) return [{ left: b.left || null, op: b.op || '>', right: b.right || null }];
+  return [{ left: null, op: '>', right: null }];
+}
+
+function mbIfHint(logic) {
+  if (logic === 'and') return '所有条件都成立，才执行下方积木';
+  if (logic === 'or') return '任意一个条件成立，就执行下方积木';
+  if (logic === 'xor') return 'XOR 的引擎实现较特殊：2 个条件时只看第 2 个；3 个以上要求后续条件与第 2 个结果一致。建议改用 AND / OR，或拆成两条 IF';
+  return '只判断这一个条件';
+}
+
+function mbCondRow(c, idStr, i, total) {
+  const op = (c && c.op) || '>';
+  const opHtml = ['>', '<', '='].map((o) => '<option value="' + o + '"' + (o === op ? ' selected' : '') + '>' + (o === '>' ? '&gt;' : o === '<' ? '&lt;' : '=') + '</option>').join('');
+  return '<div class="if-cond">'
+    + mbValHtml(c && c.left, idStr + ':c' + i + ':left', 'num')
+    + '<select class="mb-op" data-mb-op="' + esc(idStr) + ':c' + i + '">' + opHtml + '</select>'
+    + mbValHtml(c && c.right, idStr + ':c' + i + ':right', 'num')
+    + '<span class="if-cond-idx">条件 ' + (i + 1) + '</span>'
+    + (total > 1 ? '<button class="if-cond-x" data-act="mb-cond-del" data-chain="' + esc(idStr) + ':' + i + '" title="删除这条条件">×</button>' : '')
+    + '</div>';
+}
+
+function mbSetLoop(idStr, node) {
+  const st = mbStmt(idStr);
+  if (!st) return false;
+  mbSnapshot();
+  st.loop = node || null;
+  return true;
+}
+
+function mbStmtHtml(b, idStr) {
+  if (!b) return '';
+  if (b.k === 'timing') {
+    const t = (S.keywords?.timings || []).find((x) => x.en === b.v || String(x.id) === String(b.v));
+    const zh = t?.zh || b.v;
+    const args = (S.keywords && S.keywords.timingArgs && S.keywords.timingArgs[b.v]) || [];
+    const sel = (attr, cur, opts) => '<select class="mb-hat-sel" ' + attr + '="' + esc(idStr) + '">'
+      + opts.map(([v, label]) => '<option value="' + v + '"' + (v === cur ? ' selected' : '') + '>' + label + '</option>').join('')
+      + '</select>';
+    let argHtml = '';
+    if (args.includes('face')) argHtml += sel('data-mb-face', b.face || 'None', [['None', '不限面'], ['Head', '正面'], ['Tail', '反面']]);
+    if (args.includes('crit')) argHtml += sel('data-mb-crit', b.crit || 'None', [['None', '不限暴击'], ['Crit', '暴击'], ['NoCrit', '非暴击']]);
+    if (args.includes('keyword')) argHtml += '<input class="mb-hat-sel" data-mb-kw="' + esc(idStr) + '" list="mb-kw-list" placeholder="关键词" value="' + esc(b.kw || '') + '">';
+    if (args.includes('key')) argHtml += '<input class="mb-hat-sel" data-mb-key="' + esc(idStr) + '" list="mb-key-list" placeholder="按键" value="' + esc(b.key || '') + '">';
+    const kids = (b.body || []).map((x, i) => mbStmtHtml(x, idStr + '.' + i)).join('');
+    const loopNode = b.loop && (b.loop.t === 'target' || b.loop.v) ? b.loop : null;
+    const loopLabel = loopNode ? (mbTargetLabel(loopNode) + (loopNode.c ? ' · 数量 ' + loopNode.c : '')) : '无';
+    return '<div class="bk hat bk-timing' + selCls(idStr) + '" data-mb-bk="' + esc(idStr) + '">' + mbDotHtml(idStr)
+      + '<div class="bk-hat-head"><span class="bk-hat-ico">⚑</span><span class="bk-hat-name">' + esc(zh) + '</span>'
+      + '<span class="mb-loop-wrap"><span class="mb-loop-label">遍历</span>'
+      + '<button class="mb-loop-slot' + (loopNode ? ' on' : '') + '" data-act="mb-loop-slot" data-mb-loop="' + esc(idStr) + ':loop" data-chain="' + esc(idStr) + ':loop" title="本行整段脚本的 Target 会被逐个替换（引擎的 LOOP 是整条脚本级）；点一下清空">' + esc(loopLabel) + '</button></span>'
+      + '<span class="bk-tag">TIMING</span></div>'
+      + (argHtml ? '<div class="mb-hat-args">' + argHtml + '</div>' : '')
+      + '<div class="bk-body" data-stack="' + esc(idStr) + '">' + (kids || '<div class="mb-stack-empty">把积木拖到这里（与此时点同属一段代码）</div>') + '</div></div>';
+  }
+  if (b.k === 'if' || b.k === 'ifnot') {
+    const isNot = b.k === 'ifnot';
+    const logic = ['none', 'and', 'or', 'xor'].includes(b.logic) ? b.logic : 'none';
+    const conds = mbCondsOf(b);
+    const logicSel = '<select class="mb-logic" data-mb-logic="' + esc(idStr) + '">'
+      + [['none', '无'], ['and', 'AND'], ['or', 'OR'], ['xor', 'XOR']].map(([v, l]) => '<option value="' + v + '"' + (v === logic ? ' selected' : '') + '>' + l + '</option>').join('') + '</select>';
+    const rows = conds.map((c, i) => mbCondRow(c, idStr, i, conds.length)).join('');
+    const add = (logic !== 'none' && conds.length < 8) ? '<button class="btn ghost sm if-add" data-act="mb-cond-add" data-chain="' + esc(idStr) + '">＋ 条件</button>' : '';
+    const kids = (b.body || []).map((x, i) => mbStmtHtml(x, idStr + '.' + i)).join('') || '<div class="mb-stack-empty">拖动效果函数到这里</div>';
+    return '<div class="bk bk-if' + (isNot ? ' bk-ifnot' : '') + selCls(idStr) + '" data-mb-bk="' + esc(idStr) + '">' + mbDotHtml(idStr)
+      + '<div class="bk-if-head"><span class="bk-if-label">' + (isNot ? '如果不' : '如果') + '</span>' + logicSel
+      + '<span class="bk-tag">' + (isNot ? 'IFNOT' : 'IF') + '</span></div>'
+      + '<div class="bk-if-conds">' + rows + add + '</div>'
+      + '<div class="bk-if-hint">' + esc(mbIfHint(logic)) + '</div>'
+      + '<div class="bk-body" data-stack="' + esc(idStr) + '">' + kids + '</div></div>';
+  }
+  if (b.k === 'continueif') {
+    const logic = ['none', 'and', 'or', 'xor'].includes(b.logic) ? b.logic : 'none';
+    const conds = mbCondsOf(b);
+    const logicSel = '<select class="mb-logic" data-mb-logic="' + esc(idStr) + '">'
+      + [['none', '无'], ['and', 'AND'], ['or', 'OR'], ['xor', 'XOR']].map(([v, l]) => '<option value="' + v + '"' + (v === logic ? ' selected' : '') + '>' + l + '</option>').join('') + '</select>';
+    const rows = conds.map((c, i) => mbCondRow(c, idStr, i, conds.length)).join('');
+    const add = (logic !== 'none' && conds.length < 8) ? '<button class="btn ghost sm if-add" data-act="mb-cond-add" data-chain="' + esc(idStr) + '">＋ 条件</button>' : '';
+    return '<div class="bk bk-if bk-continueif' + selCls(idStr) + '" data-mb-bk="' + esc(idStr) + '">' + mbDotHtml(idStr)
+      + '<div class="bk-if-head"><span class="bk-if-label">继续如果</span>' + logicSel + '<span class="bk-tag">CONTINUEIF</span></div>'
+      + '<div class="bk-if-conds">' + rows + add + '</div>'
+      + '<div class="bk-if-hint">条件不成立时停止本条脚本的后续指令；有遍历时跳到下一个目标</div></div>';
+  }
+  if (b.k === 'assign') {
+    const vars = MB_VARS.map((v) => '<option value="' + v + '"' + (v === (b.var || 'VALUE_0') ? ' selected' : '') + '>' + v + '</option>').join('');
+    return '<div class="bk bk-assign' + selCls(idStr) + '" data-mb-bk="' + esc(idStr) + '">' + mbDotHtml(idStr)
+      + '<span class="bk-name">把</span><select class="mb-var" data-mb-var="' + esc(idStr) + '">' + vars + '</select>'
+      + '<span class="bk-name">设为</span>' + mbValHtml(b.val, idStr + ':val', 'num')
+      + '<span class="bk-tag">SET</span></div>';
+  }
+  const row = (S.mbTables || []).find((r) => r.kind === 'consequence' && r.name === b.n);
+  const label = row ? row.summary || b.n : b.n;
+  const argsHtml = (b.a || []).map((v, i) => mbArgHtml(v, idStr + ':a:' + i, mbArgType('consequence', b.n, i), 'consequence', b.n, i)).join('<span class="vb-comma">,</span>');
+  return '<div class="bk bk-cons' + selCls(idStr) + '" data-mb-bk="' + esc(idStr) + '" title="' + esc(label) + '">' + mbDotHtml(idStr)
+    + '<span class="bk-name">' + esc(b.n) + '</span><span class="bk-paren">(</span>' + argsHtml + '<span class="bk-paren">)</span>'
+    + '</div>';
+}
+
+function mbStackHtml(pathId) {
+  const list = mbStackAt(pathId === 'root' ? [] : pathId.split('.').map(Number));
+  if (!list) return '';
+  return list.map((x, i) => mbStmtHtml(x, (pathId === 'root' ? '' : pathId + '.') + i)).join('');
+}
+
+function mbPaletteHtml() {
+  const q = (S.mb.search || '').trim().toLowerCase();
+  const cat = S.mb.cat;
+  const chips = { timing: '时点', target: '目标', buff: 'Buff', var: 'VALUE', action: '效果', acq: '获取', cond: 'IF' };
+  const tabs = Object.entries(chips).map(([k, label]) => '<button class="mb-cat' + (cat === k ? ' active' : '') + '" data-act="mb-cat" data-cat="' + k + '">' + label + '</button>').join('');
+  let items = [];
+  const match = (s) => !q || String(s || '').toLowerCase().includes(q);
+  if (cat === 'timing') {
+    items = (S.keywords?.timings || []).filter((t) => scopeAllowsTiming(t.en) && (match(t.en) || match(t.zh)))
+      .map((t) => '<button class="mb-item mi-timing" data-mb-drag="stmt" data-mb-kind="timing" data-mb-val="' + esc(t.en) + '"><b>' + esc(t.zh || t.en) + '</b><small>' + esc(t.en) + '</small></button>');
+  } else if (cat === 'target') {
+    const groups = [['single', '单目标'], ['multi', '多目标'], ['tag', '修饰标签（可多选，用 + 连接）']];
+    for (const [g, label] of groups) {
+      const rows = MB_TARGETS.filter((t) => t.g === g && (match(t.n) || match(t.zh)));
+      if (!rows.length) continue;
+      items.push('<div class="mb-group">' + label + '</div>');
+      for (const t of rows) {
+        items.push('<button class="mb-item mi-target" data-mb-drag="value" data-mb-kind="target" data-mb-val="' + esc(t.n) + '"><b>' + esc(t.zh) + '</b><small>' + esc(t.n) + '</small></button>');
+      }
+    }
+    items.push('<button class="mb-item mi-target" data-act="mb-custom-target"><b>自定义目标…</b><small>基础选择器 + 排序 / 队伍 / 排除 / 数量</small></button>');
+    items.unshift('<button class="mb-item mi-loop" data-mb-drag="value" data-mb-kind="loop" data-mb-val="EveryEnemy"><b>遍历（自定义目标）</b><small>LOOP：拖到时点块右侧的「遍历 无」槽里</small></button>');
+  } else if (cat === 'var') {
+    items = MB_VARS.filter((v) => match(v))
+      .map((v) => '<button class="mb-item mi-var" data-mb-drag="value" data-mb-kind="var" data-mb-val="' + esc(v) + '"><b>' + esc(v) + '</b><small>通用数值寄存器</small></button>');
+    items.unshift('<button class="mb-item mi-math" data-mb-drag="value" data-mb-kind="math"><b>运算 math( )</b><small>加减乘除 / 取小取大取余</small></button>');
+    items.unshift('<button class="mb-item mi-assign" data-mb-drag="stmt" data-mb-kind="assign"><b>赋值：VALUE_x 设为 …</b><small>把结果存进寄存器</small></button>');
+    items.push('<button class="mb-item mi-var" data-mb-drag="value" data-mb-kind="s" data-mb-val=""><b>文本</b><small>放进去后再点文字修改</small></button>');
+  } else if (cat === 'action') {
+    items = mbRows('consequence').filter((r) => scopeAllowsCommand(r.name) && (match(r.name) || match(r.summary) || (r.aliasOf || []).some((a) => match(a))))
+      .map((r) => '<button class="mb-item mi-cons" data-mb-drag="stmt" data-mb-kind="cons" data-mb-val="' + esc(r.name) + '"><b>' + esc(r.name) + '</b><small>' + esc((r.summary || '（英文原文档未收录说明）') + ((r.aliasOf && r.aliasOf.length) ? '（旧称：' + r.aliasOf.join(' / ') + '）' : '')) + '</small></button>');
+  } else if (cat === 'cond') {
+    items = [];
+    if (match('if') || match('如果') || match('条件')) items.push('<button class="mb-item mi-cond" data-mb-drag="stmt" data-mb-kind="if"><b>如果 … 则</b><small>IF(条件)：成立时执行里面的块</small></button>');
+    if (match('ifnot') || match('如果否') || match('条件')) items.push('<button class="mb-item mi-cond" data-mb-drag="stmt" data-mb-kind="ifnot"><b>如果 … 则不</b><small>IFNOT(条件)：不成立时执行里面的块</small></button>');
+    if (match('continueif') || match('继续') || match('条件')) items.push('<button class="mb-item mi-cond" data-mb-drag="stmt" data-mb-kind="continueif"><b>继续如果</b><small>CONTINUEIF(条件)：不成立时停止本条脚本后续指令</small></button>');
+  } else if (cat === 'buff') {
+    const all = (S.keywords?.buffs || []).flatMap((b) => (Array.isArray(b.ids) ? b.ids : [b.id]).map((id) => ({ id: String(id || ''), zh: b.zh || '', native: b.native || '', source: b.source || 'vanilla', panic: !!b.panic, icon: b.icon || null })));
+    const seen = new Set();
+    const uniq = all.filter((b) => { if (!b.id || seen.has(b.id)) return false; seen.add(b.id); return true; });
+    const showPanic = !!S.mb.showPanic;
+    const hidden = uniq.filter((b) => b.panic);
+    const iconHtml = (b) => b.icon
+          ? '<img class="mb-bicon" loading="lazy" alt="" src="/api/sprite?mod=' + encodeURIComponent(b.icon.mod) + '&file=' + encodeURIComponent(b.icon.file) + '&t=' + encodeURIComponent(window.__WB_TOKEN__ || '') + '">'
+          : '<span class="mb-bicon ph">' + esc(String(b.zh || b.native || b.id || '?').slice(0, 1)) + '</span>';
+    const pick = (b) => '<button class="mb-item mi-buff" data-mb-drag="value" data-mb-kind="s" data-mb-val="' + esc(b.id) + '">' + iconHtml(b) + '<span class="mb-btxt"><b>' + esc(b.zh || b.native || b.id) + '</b><small>' + esc(b.id + (b.source === 'mod' ? ' · 本 Mod' : '')) + '</small></span></button>';
+    const vis = uniq.filter((b) => (!b.panic || showPanic) && (match(b.id) || match(b.zh) || match(b.native)));
+    const mine = vis.filter((b) => b.source === 'mod');
+    const vanilla = vis.filter((b) => b.source !== 'mod');
+    items = [];
+    if (mine.length) { items.push('<div class="mb-group">本 MOD 的 Buff（' + mine.length + '）</div>'); for (const b of mine) items.push(pick(b)); }
+    items.push('<div class="mb-group">原版 Buff（' + vanilla.length + '）</div>');
+    for (const b of vanilla) items.push(pick(b));
+    if (!q) items.push('<button class="mb-item mb-toggle" data-act="mb-toggle-panic"><b>' + (showPanic ? '隐藏' : '显示') + '恐慌 / 低理智条目</b><small>共 ' + hidden.length + ' 条，不应当作普通 Buff 施加</small></button>');
+  } else {
+    items = mbRows('acquirer').filter((r) => r.name !== 'math' && scopeAllowsCommand(r.name) && (match(r.name) || match(r.summary) || (r.aliasOf || []).some((a) => match(a))))
+      .map((r) => '<button class="mb-item mi-acq" data-mb-drag="value" data-mb-kind="acq" data-mb-val="' + esc(r.name) + '"><b>' + esc(r.name) + '()</b><small>' + esc((r.summary || '（英文原文档未收录说明）') + ((r.aliasOf && r.aliasOf.length) ? '（旧称：' + r.aliasOf.join(' / ') + '）' : '')) + '</small></button>');
+  }
+  const carry = S.mb.carry ? '<div class="mb-carry">拿着：' + (S.mb.carry.type === 'value' ? '数值块' : '语句块') + ' · 点击画布或空位放下（Esc 取消）</div>' : '';
+  return '<div class="mb-pal-body">'
+    + '<nav class="mb-cats" aria-label="积木分类">' + tabs + '</nav>'
+    + '<div class="mb-pal-main"><div class="mb-legend">金色=必填参数；灰色虚线=可选（可留空，游戏按默认处理）</div>'
+    + '<div class="mb-pal-head"><input id="mb-search" class="search" placeholder="搜索函数 / 时点" value="' + esc(S.mb.search) + '"></div>' + carry
+    + '<div class="mb-items" id="mb-items">' + (items.join('') || '<div class="mb-empty2">没有匹配项</div>') + '</div>'
+    + '</div></div>';
+}
+
+function mbToolbarHtml() {
+  const m = S.mbDoc || {};
+  return '<div class="pane-head mb-h"><div class="mb-crumb"><button class="btn ghost sm" data-act="close-module">← 返回</button>'
+    + '<h2>' + esc(m.name || m.id) + '</h2>' + (m.test ? '<span class="tag warn">测试模块 · 只读</span>' : '')
+    + '<span class="tag">用途：' + esc(scopeZhOf(m.scope || 'common')) + '</span>'
+    + '<span class="muted mb-prefix">' + esc(m.prefix || '未指定时点') + '</span></div><span class="spacer"></span>'
+    + '<button class="btn ghost sm" data-act="mb-props">属性</button>'
+    + '<button class="btn ghost sm" data-act="mb-script">' + (S.mb.showScript ? '隐藏脚本' : '查看脚本') + '</button>'
+    + '<button class="btn ghost sm" data-act="mb-undo"' + ((S.mb.hist || []).length ? '' : ' disabled') + ' title="撤销 (Ctrl+Z)">↶ 撤销</button>'
+    + '<button class="btn ghost sm" data-act="mb-redo"' + ((S.mb.redo || []).length ? '' : ' disabled') + ' title="重做 (Ctrl+Y)">↷ 重做</button>'
+    + '<button class="btn ghost sm" data-act="mb-clear">清空</button>'
+    + '<button class="btn primary sm" data-act="mb-save"' + (m.test ? ' disabled' : '') + '>保存模块</button></div>';
+}
+
+function mbPropsHtml() {
+  const m = S.mbDoc || {};
+  const timings = S.keywords?.timings || [];
+  const scopes = (S.scopeTables && S.scopeTables.list) || [{ id: 'common', zh: '通用', desc: '' }];
+  const opts = timings.map((t) => '<option value="' + esc(t.en) + '"' + (t.en === m.prefix ? ' selected' : '') + '>' + esc((t.zh ? t.zh + ' · ' : '') + t.en) + '</option>').join('');
+  return '<div class="mb-props"><label class="field"><span>名称</span><input id="mb-name" value="' + esc(m.name || '') + '"></label>'
+    + '<label class="field"><span>前缀（时点）</span><select id="mb-prefix"><option value="">（未指定）</option>' + opts + '</select></label>'
+    + '<label class="field"><span>用途</span><select id="mod-scope">' + scopes.map((k) => '<option value="' + esc(k.id) + '"' + (k.id === (m.scope || 'common') ? ' selected' : '') + '>' + esc(k.zh) + (k.desc ? ' · ' + esc(k.desc) : '') + '</option>').join('') + '</select></label>'
+    + '<label class="field"><span>描述（可执行词条）</span><textarea id="mb-desc" rows="3" class="desc-input">' + esc(m.desc || '') + '</textarea></label></div>';
+}
+
+function mbMissingInfo() {
+  const list = [];
+  const ids = new Set();
+  const push = (idStr, text) => { list.push(text); if (idStr !== null && idStr !== undefined && idStr !== '') ids.add(String(idStr)); };
+  const checkVal = (v, idStr) => {
+    if (!v || !v.a) return;
+    for (let k = 0; k < v.a.length; k++) { if (!v.a[k] && !mbArgOptional('acquirer', v.n, k)) push(idStr, v.n + ' 第 ' + (k + 1) + ' 个参数'); }
+  };
+  const walk = (blocks, prefix) => {
+    (blocks || []).forEach((b, i) => {
+      if (!b) return;
+      const idStr = prefix ? prefix + '.' + i : String(i);
+      if (b.k === 'cons') {
+        for (let k = 0; k < (b.a || []).length; k++) {
+          const v = b.a[k];
+          if (!v && !mbArgOptional('consequence', b.n, k)) push(idStr, b.n + ' 第 ' + (k + 1) + ' 个参数');
+          else if (v && v.t === 'acq') checkVal(v, idStr);
+        }
+      }
+      if (b.k === 'if' || b.k === 'ifnot' || b.k === 'continueif') {
+        (b.conds || []).forEach((c, ci) => {
+          if (!c || !c.left) push(idStr, '第 ' + (ci + 1) + ' 个条件的左侧');
+          if (!c || !c.right) push(idStr, '第 ' + (ci + 1) + ' 个条件的右侧');
+        });
+      }
+      if (b.k === 'assign' && !b.val) push(idStr, '赋值的结果值');
+      if (b.body) walk(b.body, idStr);
+    });
+  };
+  walk((S.mb && S.mb.program && S.mb.program.blocks) || [], '');
+  return { list, ids };
+}
+function mbMissingRequired() { return mbMissingInfo().list; }
+function mbPendingMissing() {
+  try { return mbMissingInfo(); } catch (e) { return { list: [], ids: new Set() }; }
+}
+function mbDotHtml(idStr) {
+  const ids = S.mb && S.mb.missingIds;
+  if (!ids || !ids.size) return '';
+  if (!ids.has(String(idStr))) return '';
+  return '<i class="bk-dot" title="该控件未填写必填参数，很可能无法正确执行"></i>';
+}
+let mbFlashTimer = 0;
+function mbFlashMissing() {
+  const stage = document.getElementById('mb-stage') || document;
+  const slots = Array.from(stage.querySelectorAll('.slot[data-mb-empty="1"]:not(.slot-opt)'));
+  if (mbFlashTimer) { clearTimeout(mbFlashTimer); mbFlashTimer = 0; }
+  for (const el of slots) el.classList.remove('flash');
+  void (stage.offsetWidth || 0);
+  for (const el of slots) el.classList.add('flash');
+  mbFlashTimer = setTimeout(() => { for (const el of slots) el.classList.remove('flash'); mbFlashTimer = 0; }, 1600);
+}
+
+const MB_HIST_MAX = 80;
+function mbSnapshot() {
+  if (!S.mb) return;
+  const now = JSON.stringify(S.mb.program);
+  S.mb.hist = S.mb.hist || [];
+  const top = S.mb.hist.length ? S.mb.hist[S.mb.hist.length - 1] : null;
+  if (top === now) return;
+  S.mb.hist.push(now);
+  if (S.mb.hist.length > MB_HIST_MAX) S.mb.hist.shift();
+  S.mb.redo = [];
+}
+function mbUndo() {
+  if (!S.mb) return;
+  if (!S.mb.hist || !S.mb.hist.length) { toast('没有可撤销的操作', 'warn'); return; }
+  S.mb.redo = S.mb.redo || [];
+  S.mb.redo.push(JSON.stringify(S.mb.program));
+  S.mb.program = JSON.parse(S.mb.hist.pop());
+  S.mb.sel = null;
+  render();
+  toast('已撤销');
+}
+function mbRedo() {
+  if (!S.mb) return;
+  if (!S.mb.redo || !S.mb.redo.length) { toast('没有可重做的操作', 'warn'); return; }
+  S.mb.hist = S.mb.hist || [];
+  S.mb.hist.push(JSON.stringify(S.mb.program));
+  S.mb.program = JSON.parse(S.mb.redo.pop());
+  S.mb.sel = null;
+  render();
+  toast('已重做');
+}
+function mbLoopRowCount() {
+  return ((S.mb && S.mb.program && S.mb.program.blocks) || []).filter((b) => b && b.k === 'timing' && b.loop && b.loop.n).length;
+}
+
+function mbCompileScript() {
+  const val = (v, nested) => {
+    if (!v) return '_';
+    if (v.t === 'target') {
+      const tn = String(v.n || '');
+      const cnt = v.c === null || v.c === undefined || v.c === '' ? '' : String(v.c);
+      if (!cnt) return tn;
+      const k = tn.indexOf('$');
+      return k < 0 ? tn + cnt : tn.slice(0, k) + cnt + tn.slice(k);
+    }
+    if (v.t === 'var') return v.n;
+    if (v.t === 'n') return String(v.v);
+    if (v.t === 's') return String(v.v);
+    if (v.t === 'acq') {
+      const list = (v.a || []).map((x) => (x ? val(x, true) : ''));
+      while (list.length && (list[list.length - 1] === '' || list[list.length - 1] === '_')) list.pop();
+      return nested ? 'G' + v.n + '{' + list.join('-') + '}' : v.n + '(' + list.join(',') + ')';
+    }
+    if (v.t === 'math') {
+      const head = v.first ? val(v.first, true) : '0';
+      const rest = (v.tail || []).map((t) => (t.op || '+') + (t.val ? val(t.val, true) : '0')).join('');
+      return 'math(' + head + rest + ')';
+    }
+    return '_';
+  };
+  const logicOf = (b) => (['and', 'or', 'xor'].includes(b.logic) ? b.logic : 'none');
+  const condText = (c) => (c && c.left ? val(c.left, true) : 'VALUE_0') + ((c && c.op) || '>') + (c && c.right ? val(c.right, true) : 'VALUE_0');
+  const condsText = (b) => {
+    const list = Array.isArray(b.conds) && b.conds.length ? b.conds : [{ left: b.left, op: b.op, right: b.right }];
+    const head = logicOf(b) === 'none' ? '' : logicOf(b).toUpperCase() + ',';
+    return head + list.map(condText).join(',');
+  };
+  const stmt = (b) => {
+    if (!b) return '';
+    if (b.k === 'cons') {
+      const list = (b.a || []).map((x) => (x ? val(x, true) : ''));
+      while (list.length && (list[list.length - 1] === '' || list[list.length - 1] === '_')) list.pop();
+      return b.n + '(' + list.join(',') + ')';
+    }
+    if (b.k === 'assign') return (b.var || 'VALUE_0') + ':' + val(b.val);
+    if (b.k === 'if' || b.k === 'ifnot') {
+      const kw = b.k === 'ifnot' ? 'IFNOT' : 'IF';
+      const kids = (b.body || []).map(stmt).filter(Boolean).join(':');
+      return kw + '(' + condsText(b) + ')' + (kids ? ':' + kids : '');
+    }
+    if (b.k === 'continueif') return 'CONTINUEIF(' + condsText(b) + ')';
+    return '';
+  };
+  const hatText = (b) => {
+    const args = (S.keywords && S.keywords.timingArgs && S.keywords.timingArgs[b.v]) || [];
+    const parts = [];
+    if (args.includes('face') || args.includes('crit')) {
+      parts.push(args.includes('face') ? (b.face || 'None') : 'None');
+      parts.push(args.includes('crit') ? (b.crit || 'None') : 'None');
+    }
+    if (args.includes('keyword') && b.kw) parts.push(b.kw);
+    if (args.includes('key') && b.key) parts.push(b.key);
+    const nonEmpty = parts.filter((x) => x && x !== 'None').length > 0;
+    return 'TIMING:' + b.v + (nonEmpty ? '(' + parts.join(',') + ')' : '');
+  };
+  const rows = [];
+  for (const b of (S.mb.program.blocks || [])) {
+    if (!b) continue;
+    if (b.k === 'timing') { rows.push({ hat: b, items: (b.body || []).slice() }); continue; }
+    if (!rows.length) rows.push({ hat: null, items: [] });
+    rows[rows.length - 1].items.push(b);
+  }
+  const parts = [];
+  for (const r of rows) {
+    if (r.hat) {
+      parts.push(hatText(r.hat));
+      if (r.hat.loop && r.hat.loop.n) parts.push('LOOP:' + val(r.hat.loop, true));
+    }
+    for (const it of r.items) { const t = stmt(it); if (t) parts.push(t); }
+  }
+  if (!parts.length) return '// 还没有积木';
+  return 'Modular/' + parts.join('/');
+}
+
+function renderModuleEditor(back) {
+  if (!S.mb || !S.mbDoc) {
+    return '<div class="pane-head">' + back + '<div><h2>模块编辑</h2></div></div><div class="mb-loading">正在载入模块…</div>';
+  }
+  if (S.mb && S.mb.saved === undefined) S.mb.saved = JSON.stringify(S.mb.program);
+  S.mb.missingIds = S.mb.showMissing ? mbMissingInfo().ids : null;
+  const kwList = (S.keywords?.buffs || []).map((b) => String(b.id || (b.ids && b.ids[0]) || '')).filter(Boolean);
+  const keyList = ['LeftControl', 'LeftShift', 'LeftAlt', 'Space', 'Tab', 'E', 'Q', 'R', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'];
+  const datalists = '<datalist id="mb-kw-list">' + kwList.map((k) => '<option value="' + esc(k) + '">').join('') + '</datalist>'
+    + '<datalist id="mb-key-list">' + keyList.map((k) => '<option value="' + k + '">').join('') + '</datalist>';
+  const script = S.mb.showScript ? '<pre class="mb-script" id="mb-script">' + esc(mbCompileScript()) + '</pre>' : '';
+  const loopRows = mbLoopRowCount();
+  const loopWarn = loopRows > 1
+    ? '<div class="mb-warn">有 ' + loopRows + ' 行都设置了遍历：引擎的 LOOP 是模块级字段，同一模块只会应用最后一段，请只保留一行。</div>'
+    : '';
+  return mbToolbarHtml() + loopWarn
+    + (S.mb.showProps ? mbPropsHtml() : '')
+    + '<div class="mb-body"><aside class="mb-pal">' + mbPaletteHtml() + '</aside>'
+    + '<section class="mb-stage"><div class="mb-stage-head"><span>积木画布</span><span class="muted">从上到下拼接；带括号的块可以往括号里拖数值块</span></div>'
+    + '<div class="mb-canvas" id="mb-canvas"><div class="mb-stack" data-stack="root">' + mbStackHtml('root') + '</div>'
+    + (S.mb.program.blocks.length ? '' : '<div class="mb-empty">拖一个「时点」积木进来开始</div>') + '</div>' + '<div class="mb-trash" id="mb-trash" title="拖到这里删除"><span>🗑</span><small>拖此删除</small></div>' + script + '</section></div>' + datalists;
+}
+/* ---------------- 程序变更 ---------------- */
+
+function mbRowByName(name) { return (S.mbTables || []).find((r) => r.name === name); }
+function mbArgEnum(kind, name, i) {
+  const m = (S.keywords && S.keywords.argEnums) || {};
+  return m[kind + ':' + name + ':' + i] || null;
+}
+
+// 固定取值集合 → 下拉；其余仍走积木槽
+function mbArgHtml(v, chain, slotType, kind, name, i) {
+  const en = mbArgEnum(kind, name, i);
+  const opt = mbArgOptional(kind, name, i);
+  if (!en) return mbValHtml(v, chain, slotType, opt);
+  const scalar = !v || v.t === 's' || v.t === 'n' || v.t === 'var';
+  if (!scalar) return mbValHtml(v, chain, slotType, opt);
+  let cur = '';
+  if (v) cur = v.t === 'var' ? String(v.n) : String(v.v);
+  const has = en.values.some(([val]) => String(val) === cur);
+  const extra = cur && !has ? '<option value="' + esc(cur) + '" selected>（原值）' + esc(cur) + '</option>' : '';
+  const opts = en.values.map(([val, label]) => '<option value="' + esc(val) + '"' + (String(val) === cur ? ' selected' : '') + '>' + esc(label) + '</option>').join('');
+  return '<select class="mb-arg-enum" data-mb-arg="' + esc(chain) + '" title="' + esc(en.zh || '') + '">'
+    + '<option value=""' + (cur ? '' : ' selected') + '>（空）</option>' + extra + opts + '</select>';
+}
+
+function mbArgOptional(kind, name, i) {
+  const map = S.keywords && S.keywords.argOptional && S.keywords.argOptional[kind];
+  const list = map && map[name];
+  if (Array.isArray(list) && list.includes(i)) return true;
+  const r = (S.mbTables || []).find((x) => x.kind === kind && x.name === name);
+  const p = r && Array.isArray(r.params) ? r.params[i] : null;
+  return /^opt/i.test(String((p && p.name) || ''));
+}
+function mbArgCount(kind, name) {
+  const ac = S.keywords && S.keywords.argCounts && S.keywords.argCounts[kind];
+  if (ac && typeof ac[name] === 'number') return ac[name];
+  const r = (S.mbTables || []).find((x) => x.kind === kind && x.name === name);
+  return r && Array.isArray(r.args) ? r.args.length : 0;
+}
+
+function mbPayloadFrom(el) {
+  const kind = el.dataset.mbKind;
+  const val = el.dataset.mbVal || '';
+  if (el.dataset.mbDrag === 'stmt') {
+    if (kind === 'timing') return { type: 'stmt', node: { k: 'timing', v: val, body: [], loop: null } };
+    if (kind === 'if') return { type: 'stmt', node: { k: 'if', logic: 'none', conds: [{ left: null, op: '>', right: null }], body: [] } };
+    if (kind === 'ifnot') return { type: 'stmt', node: { k: 'ifnot', logic: 'none', conds: [{ left: null, op: '>', right: null }], body: [] } };
+    if (kind === 'continueif') return { type: 'stmt', node: { k: 'continueif', logic: 'none', conds: [{ left: null, op: '>', right: null }] } };
+    if (kind === 'cons') return { type: 'stmt', node: { k: 'cons', n: val, a: new Array(mbArgCount('consequence', val)).fill(null) } };
+    if (kind === 'assign') return { type: 'stmt', node: { k: 'assign', var: 'VALUE_0', val: null } };
+  } else {
+    if (kind === 'loop') return { type: 'value', loop: true, node: { t: 'target', n: val || 'EveryEnemy', c: null } };
+    if (kind === 'target') return { type: 'value', node: { t: 'target', n: val, c: null } };
+    if (kind === 'var') return { type: 'value', node: { t: 'var', n: val } };
+    if (kind === 'n') return { type: 'value', node: { t: 'n', v: Number(val) || 0 } };
+    if (kind === 's') return { type: 'value', node: { t: 's', v: String(val || '') } };
+    if (kind === 'acq') return { type: 'value', node: { t: 'acq', n: val, a: new Array(mbArgCount('acquirer', val)).fill(null) } };
+    if (kind === 'math') return { type: 'value', node: { t: 'math', first: null, tail: [{ op: '+', val: null }] } };
+  }
+  return null;
+}
+
+function mbAccess(chain) {
+  // 兼容两种链式写法：`0:a:3`（参数槽）与 `0:a3`、`0:c0:left`（条件槽）
+  const parts = String(chain || '').split(':');
+  const all = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i] === 'a' && /^\d+$/.test(parts[i + 1] || '')) { all.push('a' + parts[i + 1]); i++; }
+    else all.push(parts[i]);
+  }
+  if (all.length < 2) return null;
+  const stmt = mbStmt(all[0]);
+  if (!stmt) return null;
+  const steps = [];
+  for (let i = 1; i < all.length; i++) {
+    const raw = all[i];
+    const pieces = raw.split('>');
+    const head = pieces[0];
+    const rest = pieces.slice(1).map((x) => Number(x)).filter((x) => !isNaN(x));
+    let arr = null, idx = null, field = null;
+    let m = /^a(\d+)$/.exec(head);
+    if (m) { arr = 'a'; idx = Number(m[1]); }
+    else if ((m = /^c(\d+)$/.exec(head))) { arr = 'conds'; idx = Number(m[1]); }
+    else if ((m = /^t(\d+)$/.exec(head))) { arr = 'tail'; idx = Number(m[1]); }
+    else if (['loop', 'val', 'left', 'right', 'op', 'f'].includes(head)) field = head;
+    else return null;
+    steps.push({ arr, idx, field, rest });
+  }
+  const readStep = (node, st) => {
+    if (!node) return null;
+    if (st.field === 'f') return node.first || null;
+    if (st.arr === 'conds') { const c = (node.conds || [])[st.idx] || null; return c; }
+    if (st.arr === 'a') return (node.a || [])[st.idx] || null;
+    if (st.arr === 'tail') { const e = (node.tail || [])[st.idx] || null; return e ? e.val || null : null; }
+    return node[st.field] === undefined ? null : node[st.field];
+  };
+  const writeStep = (node, st, v) => {
+    if (!node) return false;
+    if (st.field === 'f') { node.first = v; return true; }
+    if (st.arr === 'conds') { node.conds = node.conds || []; const c = node.conds[st.idx]; if (!c) return false; return true; }
+    if (st.arr === 'a') { node.a = node.a || []; node.a[st.idx] = v; return true; }
+    if (st.arr === 'tail') { node.tail = node.tail || []; const e = node.tail[st.idx]; if (!e) return false; e.val = v; return true; }
+    node[st.field] = v; return true;
+  };
+  const lastSt = steps[steps.length - 1];
+  const descend = (v, idxs) => { let cur = v; for (const k of idxs) { if (!cur) return null; cur = (cur.a || [])[k] || null; } return cur; };
+  const get = () => {
+    let cur = stmt;
+    for (let i = 0; i < steps.length - 1; i++) { cur = readStep(cur, steps[i]); if (!cur) return null; }
+    const v = readStep(cur, lastSt);
+    return lastSt.rest.length ? descend(v, lastSt.rest) : v;
+  };
+  const set = (v) => {
+    let cur = stmt;
+    for (let i = 0; i < steps.length - 1; i++) { cur = readStep(cur, steps[i]); if (!cur) return false; }
+    if (lastSt.rest.length) {
+      let holder = readStep(cur, lastSt);
+      for (let k = 0; k < lastSt.rest.length - 1; k++) holder = (holder && holder.a ? holder.a[lastSt.rest[k]] : null);
+      if (!holder) return false;
+      holder.a = holder.a || [];
+      holder.a[lastSt.rest[lastSt.rest.length - 1]] = v;
+      return true;
+    }
+    return writeStep(cur, lastSt, v);
+  };
+  return { get, set };
+}
+
+function mbIsDirty() {
+  if (!S.mb || S.mb.saved === undefined) return false;
+  try { return JSON.stringify(S.mb.program) !== S.mb.saved; } catch { return false; }
+}
+function mbLeaveGuard(then) {
+  const info = mbPendingMissing();
+  if (info.list.length) {
+    S.mb.leave = then;
+    const sample = info.list.slice(0, 3).join('、');
+    modal({
+      title: '有未填的必填参数',
+      body: '<p>还有 <b>' + info.list.length + '</b> 处必填参数没有填：' + esc(sample) + (info.list.length > 3 ? ' 等' : '') + '。</p>'
+        + '<p class="muted">现在退出仍会把当前改动保存下来，但保存后这些控件右上角会出现红点，游戏里很可能无法正确执行。</p>',
+      footer: '<button class="btn ghost" data-act="close-modal">返回修改</button><button class="btn danger" data-act="mb-leave-missing-ok">仍然退出</button>',
+    });
+    return;
+  }
+  mbGuardDirty(then);
+}
+function mbGuardDirty(then) {
+  if (!mbIsDirty()) { then(); return; }
+  S.mb.leave = then;
+  modal({ title: '模块尚未保存', body: '<p>当前模块有未保存的改动。</p>', footer: '<button class="btn ghost" data-act="close-modal">取消</button><button class="btn danger" data-act="mb-leave-discard">放弃更改</button><button class="btn primary" data-act="mb-leave-save">保存并离开</button>' });
+}
+function mbSetSlot(chain, value) { const ref = mbAccess(chain); if (!ref) return false; ref.set(value); return true; }
+function mbClearSlot(chain) { const ref = mbAccess(chain); if (!ref) return; mbSnapshot(); ref.set(null); }
+function mbInsideLoop(stackId) {
+  const p = String(stackId || 'root');
+  if (p === 'root') return false;
+  let list = S.mb.program.blocks;
+  for (const k of p.split(".").map(Number)) {
+    const n = list && list[k];
+    if (!n) return false;
+    if (n.k === 'loop') return true;
+    list = n.body;
+  }
+  return false;
+}
+function mbKindName(node) {
+  const k = node && node.k;
+  return k === 'if' ? '如果' : k === 'ifnot' ? '如果否' : k === 'continueif' ? '继续如果' : k === 'assign' ? '赋值' : '效果块';
+}
+function mbHasTimingAncestor(stackId) {
+  const p = String(stackId || 'root');
+  if (!p || p === 'root') return false;
+  let list = (S.mb && S.mb.program && S.mb.program.blocks) || [];
+  for (const seg of p.split('.')) {
+    const node = list[Number(seg)];
+    if (!node) return false;
+    if (node.k === 'timing') return true;
+    list = node.body || [];
+  }
+  return false;
+}
+function mbAllowsPlace(stackId, index, node) {
+  if (!node) return { ok: false, msg: '' };
+  const root = String(stackId || 'root') === 'root';
+  if (node.k === 'timing') {
+    if (!root) return { ok: false, msg: '时点块只能放在最外层' };
+    return { ok: true, msg: '' };
+  }
+  if (root) return { ok: false, msg: mbKindName(node) + '必须放进某个时点块里面（最外层只放时点）' };
+  if (!mbHasTimingAncestor(stackId)) return { ok: false, msg: '只能放在时点块内部' };
+  return { ok: true, msg: '' };
+}
+function mbInsert(stackId, index, node) {
+  if (!node) return false;
+  const root = String(stackId || 'root') === 'root';
+  const list = root ? ((S.mb && S.mb.program && S.mb.program.blocks) || []) : mbStackAt(String(stackId).split('.').map(Number));
+  if (!list) return false;
+  const i = Math.max(0, Math.min(Number(index) || 0, list.length));
+  const gate = mbAllowsPlace(stackId, i, node);
+  if (!gate.ok) { toast(gate.msg, 'warn'); return false; }
+  mbSnapshot();
+  list.splice(i, 0, node);
+  return true;
+}
+function mbRemove(idStr) {
+  const p = String(idStr).split('.').map(Number);
+  const list = mbStackAt(p.slice(0, -1));
+  if (!list) return;
+  mbSnapshot();
+  list.splice(p[p.length - 1], 1);
+}
+
+function mbIndexAt(stackEl, y) {
+  const kids = [...stackEl.children].filter((c) => c.classList && c.classList.contains('bk'));
+  for (let i = 0; i < kids.length; i++) {
+    const r = kids[i].getBoundingClientRect();
+    if (y < r.top + r.height / 2) return i;
+  }
+  return kids.length;
+}
+
+/* ---------------- 拖拽与点选 ---------------- */
+
+function mbGhost(text, x, y) {
+  let g = document.getElementById('mb-ghost');
+  if (!g) { g = document.createElement('div'); g.id = 'mb-ghost'; document.body.appendChild(g); }
+  g.textContent = text;
+  g.style.left = x + 12 + 'px';
+  g.style.top = y + 10 + 'px';
+  g.hidden = false;
+}
+
+function mbClearHighlight() {
+  document.querySelectorAll('.mb-hot').forEach((el) => el.classList.remove('mb-hot'));
+}
+
+function mbInlineEdit(el, chain, type, cur) {
+  if (!el || el.querySelector('input.mb-inline')) return;
+  const isNum = type === 'num';
+  const original = el.innerHTML;
+  const inp = document.createElement('input');
+  inp.className = 'mb-inline';
+  inp.type = isNum ? 'number' : 'text';
+  inp.value = cur === null || cur === undefined ? '' : String(cur);
+  el.innerHTML = '';
+  el.appendChild(inp);
+  inp.focus();
+  try { inp.select(); } catch {}
+  let done = false;
+  // 空输入 = 取消：只把本槽恢复原样，不做整页重绘（否则会顺手把另一个正在编辑的输入框重建掉）
+  const finishEmpty = () => {
+    if (el.isConnected) el.innerHTML = original;
+    if (!document.querySelector('input.mb-inline')) setTimeout(() => { if (!document.querySelector('input.mb-inline')) render(); }, 0);
+  };
+  const commit = () => {
+    if (done) return;
+    done = true;
+    const raw = String(inp.value == null ? '' : inp.value).trim();
+    if (raw === '') { finishEmpty(); return; }
+    mbSnapshot();
+    if (isNum) {
+      const num = Number(raw);
+      if (!Number.isFinite(num)) { finishEmpty(); return; }
+      mbSetSlot(chain, { t: 'n', v: Math.trunc(num) });
+    } else {
+      mbSetSlot(chain, { t: 's', v: raw });
+    }
+    // 若还有别的槽在编辑，先不重绘（等它结束时的重绘一起显示新值）
+    if (document.querySelectorAll('input.mb-inline').length > 1) { if (el.isConnected) el.innerHTML = original; return; }
+    setTimeout(render, 0);
+  };
+  const cancel = () => {
+    if (done) return;
+    done = true;
+    finishEmpty();
+  };
+  inp.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+  });
+  inp.addEventListener('blur', commit);
+}
+function mbSlotChain(el) {
+  if (!el) return '';
+  return el.dataset.mbSlot || el.dataset.chain || '';
+}
+
+function mbSlotAt(x, y) {
+  for (const el of document.querySelectorAll('.slot, [data-mb-slot]')) {
+    const r = el.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return el;
+  }
+  return null;
+}
+
+function mbDropResolve(x, y, payload) {
+  const el = document.elementFromPoint(x, y);
+  if (!el) return false;
+  const geoSlot = mbSlotAt(x, y);
+  if (payload.loop) {
+    const slotEl = el.closest('[data-mb-loop]') || (geoSlot && geoSlot.closest('[data-mb-loop]'));
+    if (!slotEl) { toast('遍历块只能放到时点块右侧的「遍历」槽里', 'warn'); return false; }
+    return mbSetSlot(slotEl.dataset.mbLoop, payload.node);
+  }
+  const slot = el.closest('.slot') || el.closest('[data-mb-slot]') || geoSlot;
+  if (payload.type === 'value') {
+    if (!slot) return false;
+    const want = slot.dataset.slotType || 'any';
+    if (!mbCompatible(want, mbValueType(payload.node))) { toast('这个位置只能放「' + (MB_TYPE_ZH[want] || want) + '」', 'warn'); return false; }
+    return mbSetSlot(mbSlotChain(slot), payload.node);
+  }
+  const stackEl = el.closest('[data-stack]');
+  if (slot && !stackEl) return false;
+  if (stackEl) return mbInsert(stackEl.dataset.stack, mbIndexAt(stackEl, y), payload.node);
+  if (el.closest('.mb-canvas')) {
+    const root = document.querySelector('.mb-canvas .mb-stack');
+    if (root) { mbInsert('root', mbIndexAt(root, y), payload.node); return true; }
+  }
+  return false;
+}
+
+function mbOverTrash(x, y) {
+  const t = document.getElementById('mb-trash');
+  if (!t) return false;
+  const r = t.getBoundingClientRect();
+  return x >= r.left - 6 && x <= r.right + 6 && y >= r.top - 6 && y <= r.bottom + 6;
+}
+
+function mbBindDrag() {
+  document.addEventListener('mousedown', (e) => {
+    if (!S.mb || !S.mbDoc) return;
+    if (e.button !== 0) return;
+    // 原生控件（下拉、输入框）优先处理，绝不能被拖拽拦截（否则 preventDefault 会吃掉下拉与聚焦）
+    if (e.target.closest('input, select, textarea, option, [contenteditable="true"], label')) {
+      if (!e.target.closest('[data-mb-drag]')) return;
+    }
+    if (e.target.closest('.bk-x, .vb-x, .vb-edit, .no-drag')) return;
+    if (e.target.closest('button') && !e.target.closest('[data-mb-drag]')) return;
+    const pal = e.target.closest('[data-mb-drag]');
+    const bk = e.target.closest('[data-mb-bk]');
+    const vb = e.target.closest('.vb');
+    if (!pal && !bk && !vb) return;
+    if (!pal && !vb && e.target.closest('.slot')) return;
+    let payload = null; let label = '';
+    if (pal) { payload = mbPayloadFrom(pal); label = (pal.querySelector('b') || {}).textContent || '积木'; if (payload) payload.fromPalette = true; }
+    else if (vb) { const chain = vb.dataset.chain || (vb.parentElement && vb.parentElement.closest('[data-mb-slot]')?.dataset.mbSlot) || ''; if (!chain) return; const ref = mbAccess(chain); if (!ref || !ref.get()) return; payload = { type: 'value', node: JSON.parse(JSON.stringify(ref.get())), fromChain: chain }; label = '数值块'; }
+    else if (bk) { const id = bk.dataset.mbBk; const cur = mbStmt(id); if (!cur) return; payload = { type: 'stmt', node: JSON.parse(JSON.stringify(cur)), fromId: id }; label = cur.k === 'if' ? '如果' : (cur.n || cur.k); }
+    if (!payload) return;
+    S.mb.drag = { payload, label, x0: e.clientX, y0: e.clientY, active: false };
+    e.preventDefault();
+  }, true);
+
+  document.addEventListener('mousemove', (e) => {
+    const d = S.mb && S.mb.drag;
+    if (!d) return;
+    if (!d.active) {
+      if (Math.abs(e.clientX - d.x0) + Math.abs(e.clientY - d.y0) < 6) return;
+      d.active = true;
+      document.body.classList.add('mb-dragging');
+    }
+    mbGhost(d.label, e.clientX, e.clientY);
+    mbClearHighlight();
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const slot = el && el.closest('.slot');
+    const stackEl = el && el.closest('[data-stack]');
+    const trashEl = document.getElementById('mb-trash');
+    if (trashEl) { if (mbOverTrash(e.clientX, e.clientY)) trashEl.classList.add('hot'); else trashEl.classList.remove('hot'); }
+    if (d.payload.type === 'value') { if (slot) slot.classList.add('mb-hot'); }
+    else if (stackEl) stackEl.classList.add('mb-hot');
+  });
+
+  document.addEventListener('mouseup', (e) => {
+    const d = S.mb && S.mb.drag;
+    if (!d) return;
+    S.mb.drag = null;
+    const g = document.getElementById('mb-ghost'); if (g) g.hidden = true;
+    document.body.classList.remove('mb-dragging');
+    mbClearHighlight();
+    if (d.active) {
+      S.mb.suppressClick = Date.now();
+      const dropEl = document.elementFromPoint(e.clientX, e.clientY);
+      const onTrash = mbOverTrash(e.clientX, e.clientY);
+      const onPal = dropEl && dropEl.closest && dropEl.closest('.mb-pal');
+      if ((onTrash || onPal) && (d.payload.fromId || d.payload.fromChain)) {
+        if (d.payload.fromId) mbRemove(d.payload.fromId); else mbClearSlot(d.payload.fromChain);
+        toast(onTrash ? '已删除该积木' : '已移出画布', 'warn');
+        render();
+        return;
+      }
+      const ok = mbDropResolve(e.clientX, e.clientY, d.payload);
+      if (!ok) { toast('这里放不下这个块', 'warn'); }
+      else if (d.payload.fromId) mbRemove(d.payload.fromId);
+      else if (d.payload.fromChain) {
+        const up = document.elementFromPoint(e.clientX, e.clientY);
+        const tgt = up && up.closest ? (up.closest('[data-mb-slot]') || up.closest('.slot')) : null;
+        if (mbSlotChain(tgt) !== d.payload.fromChain) mbClearSlot(d.payload.fromChain);
+      }
+      render();
+      return;
+    }
+    // 未拖动 = 点击
+    if (d.payload.fromPalette) {
+      S.mb.carry = d.payload;
+      toast(d.payload.type === 'value' ? '已选中数值块：点一个空位放进去' : '已选中语句块：点画布放下');
+      render();
+      return;
+    }
+    if (S.mb.carry) {
+      const ok = mbDropResolve(e.clientX, e.clientY, S.mb.carry);
+      if (ok) { S.mb.carry = null; render(); }
+    }
+  });
+}
+
+function mbBindEmptySlot() {
+  if (S.__slotBound) return;
+  S.__slotBound = true;
+  document.addEventListener('click', (e) => {
+    if (!S.mb || !S.mbDoc || S.mb.carry) return;
+    const slot = e.target && e.target.closest ? e.target.closest('.slot[data-mb-empty]') : null;
+    if (!slot) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const st = slot.dataset.slotType || 'any';
+    if (st === 'num' || st === 'text' || st === 'any') { mbInlineEdit(slot, mbSlotChain(slot), st === 'text' ? 'text' : 'num', null); return; }
+    toast('从左侧把「' + (MB_TYPE_ZH[st] || '对应类型') + '」积木拖进这个空位（或点左侧条目后点这里）');
+  }, true);
+}
+
+function mbPaletteClick(e) {
+  const pal = e.target.closest('[data-mb-drag]');
+  if (!pal) return false;
+  const payload = mbPayloadFrom(pal);
+  if (!payload) return false;
+  S.mb.carry = payload;
+  render();
+  return true;
+}
+
+function mbCanvasClick(e) {
+  if (!S.mb || !S.mb.carry) return false;
+  const carry = S.mb.carry;
+  const geoSlot = mbSlotAt(e.clientX, e.clientY);
+  if (carry.loop) {
+    const slotEl = e.target.closest('[data-mb-loop]') || (geoSlot && geoSlot.closest('[data-mb-loop]'));
+    if (!slotEl) { toast('先点时点块右侧的「遍历」槽', 'warn'); return false; }
+    if (!mbSetSlot(slotEl.dataset.mbLoop, carry.node)) return false;
+    S.mb.carry = null; render(); return true;
+  }
+  const slot = e.target.closest('.slot') || e.target.closest('[data-mb-slot]') || geoSlot;
+  const stackEl = e.target.closest('[data-stack]');
+  if (carry.type === 'value') {
+    if (!slot) return false;
+    const want = slot.dataset.slotType || 'any';
+    if (!mbCompatible(want, mbValueType(carry.node))) { toast('这个位置只能放「' + (MB_TYPE_ZH[want] || want) + '」', 'warn'); return false; }
+    mbSetSlot(mbSlotChain(slot), carry.node);
+  } else {
+    let ok = false;
+    if (stackEl) ok = mbInsert(stackEl.dataset.stack, stackEl.children.length, carry.node);
+    else {
+      const root = document.querySelector('.mb-canvas .mb-stack');
+      if (!root) return false;
+      ok = mbInsert('root', root.children.length, carry.node);
+    }
+    if (!ok) { render(); return false; }
+  }
+  S.mb.carry = null;
+  render();
+  return true;
+}
+
+/* ---------- 槽位下拉选择器（v0.5.3 实参类型化） ---------- */
+function mbBuffChoices() {
+  const list = S.keywords?.buffs || [];
+  const out = [];
+  for (const b of list) {
+    const ids = Array.isArray(b.ids) ? b.ids : [b.id || b.n];
+    const zh = String(b.zh || b.native || b.name || '');
+    for (const id of ids.slice(0, 3)) if (id) out.push({ id: String(id), zh });
+  }
+  return out;
+}
+
+function mbPickButton(chain, kind, val, label, sub) {
+  return '<button class="mb-pick" data-act="mb-pick" data-chain="' + esc(chain) + '" data-kind="' + esc(kind) + '" data-val="' + esc(val) + '">'
+    + '<b>' + esc(label) + '</b>' + (sub ? '<small>' + esc(sub) + '</small>' : '') + '</button>';
+}
+
+function openSlotPicker(chain, type) {
+  const st = type || 'any';
+  const zh = MB_TYPE_ZH[st] || MB_TYPE_ZH.any;
+  let body = '<div class="mb-pick-wrap">';
+  if (st === 'target' || st === 'any') {
+    const groups = [['single', '单目标'], ['multi', '多目标']];
+    body += '<div class="field"><span>目标选择器</span>';
+    for (const [g, label] of groups) {
+      body += '<div class="mb-group">' + label + '</div><div class="mb-picks">'
+        + MB_TARGETS.filter((t) => t.g === g).map((t) => mbPickButton(chain, 'target', t.n, t.zh, t.n)).join('')
+        + '</div>';
+    }
+    body += '<div class="mb-group">自定义</div><div class="mb-picks">'
+      + '<button class="btn ghost sm" data-act="mb-custom-target" data-chain="' + esc(chain) + '">自定义目标…</button>'
+      + '</div></div>';
+  }
+  if (st === 'num' || st === 'any') {
+    body += '<div class="field"><span>数值 / VALUE 寄存器</span><div class="mb-picks">'
+      + mbPickButton(chain, 'n', '0', '数值 0', '之后可点 ✎ 改')
+      + MB_VARS.map((v) => mbPickButton(chain, 'var', v, v, '寄存器')).join('')
+      + '</div><div class="row-inline"><input id="mb-pick-num" class="num" type="number" placeholder="整数"><button class="btn primary sm" data-act="mb-pick-num" data-chain="' + esc(chain) + '">填入整数</button></div></div>';
+  }
+  if (st === 'var') {
+    body += '<div class="field"><span>VALUE 寄存器</span><div class="mb-picks">' + MB_VARS.map((v) => mbPickButton(chain, 'var', v, v, '寄存器')).join('') + '</div></div>';
+  }
+  if (st === 'buff') {
+    const list = mbBuffChoices();
+    const opts = list.slice(0, 3000).map((b) => '<option value="' + esc(b.id) + '">' + esc((b.zh ? b.zh + ' · ' : '') + b.id) + '</option>').join('');
+    body += '<div class="field"><span>Buff 关键词（英文 id）</span><div class="row-inline"><select id="mb-pick-buff">' + opts + '</select>'
+      + '<button class="btn primary sm" data-act="mb-pick-buff" data-chain="' + esc(chain) + '">填入</button></div></div>';
+  }
+  if (st === 'op') {
+    body += '<div class="field"><span>运算符</span><div class="mb-picks">' + ['ADD', 'SUB', 'MUL'].map((o) => mbPickButton(chain, 's', o, o, '')).join('') + '</div></div>';
+  }
+  if (st === 'text' || st === 'any') {
+    body += '<div class="field"><span>文本</span><div class="row-inline"><input id="mb-pick-text" placeholder="输入文本"><button class="btn primary sm" data-act="mb-pick-text" data-chain="' + esc(chain) + '">填入文本</button></div></div>';
+  }
+  body += '<div class="hint muted">这个位置只接受「' + esc(zh) + '」类型的块；也可以从左侧调色板直接拖入。</div></div>';
+  modal({ title: '填入「' + esc(zh) + '」', body, footer: '<button class="btn ghost" data-act="close-modal">取消</button>' });
+}
+
+function mbPickApply(chain, node) {
+  if (!mbSetSlot(chain, node)) return;
+  closeModal();
+  render();
+}
+
+Object.assign(actions, {
+  'mb-pick': (el) => {
+    const kind = el.dataset.kind;
+    const val = el.dataset.val;
+    const node = kind === 'target' ? { t: 'target', n: val, c: null }
+      : kind === 'var' ? { t: 'var', n: val }
+        : kind === 'n' ? { t: 'n', v: Number(val) || 0 }
+          : { t: 's', v: val };
+    mbPickApply(el.dataset.chain, node);
+  },
+  'mb-pick-math': (el) => {
+    mbPickApply(el.dataset.chain, { t: 'math', first: null, tail: [{ op: '+', val: null }] });
+  },
+  'mb-pick-num': (el) => {
+    const raw = (document.getElementById('mb-pick-num')?.value || '').trim();
+    if (!/^-?\d+$/.test(raw)) { toast('请输入整数', 'warn'); return; }
+    mbPickApply(el.dataset.chain, { t: 'n', v: Number(raw) });
+  },
+  'mb-pick-buff': (el) => {
+    const v = document.getElementById('mb-pick-buff')?.value || '';
+    if (!v) { toast('请选择 Buff 关键词', 'warn'); return; }
+    mbPickApply(el.dataset.chain, { t: 's', v });
+  },
+  'mb-pick-text': (el) => {
+    const v = document.getElementById('mb-pick-text')?.value || '';
+    mbPickApply(el.dataset.chain, { t: 's', v });
+  },
+});
+function mbTargetModalBody(cur) {
+  const curN = String(cur.n || '');
+  const bases = MB_TARGETS.filter((t) => t.g !== 'tag');
+  const noDollar = curN.split('$')[0];
+  const head = noDollar.split('+')[0];
+  const idHit = /^id(\d+)$/.exec(head);
+  const instHit = /^inst(\d+)$/.exec(head);
+  const baseHit = (idHit || instHit) ? null : (bases.find((t) => head.startsWith(t.n)) || null);
+  const base = baseHit ? baseHit.n : '';
+  const rest = baseHit ? head.slice(baseHit.n.length) : '';
+  const tail = noDollar.split('+').slice(1).join('+');
+  const tagPool = MB_TARGET_TAGS.map((t) => t.n);
+  const tags = tagPool.filter((n) => rest.includes(n) || tail.split('+').includes(n));
+  const dollar = curN.includes('$') ? curN.slice(curN.indexOf('$') + 1) : '';
+  const expr = (baseHit || idHit || instHit) ? (tail && !tags.length ? tail : '') : noDollar;
+  const baseOpts = ['single', 'multi'].map((g) => {
+    const label = g === 'single' ? '单目标' : '多目标';
+    const rows = MB_TARGETS.filter((t) => t.g === g);
+    return '<optgroup label="' + label + '">' + rows.map((t) => '<option value="' + esc(t.n) + '"' + (t.n === base ? ' selected' : '') + '>' + esc(t.zh + ' · ' + t.n) + '</option>').join('') + '</optgroup>';
+  }).join('');
+  const tagHtml = MB_TARGET_TAGS.map((t) => '<label class="chk"><input type="checkbox" class="mb-tag" value="' + esc(t.n) + '"' + (tags.includes(t.n) ? ' checked' : '') + '><span>' + esc(t.zh) + '</span></label>').join('');
+  const count = cur.c === null || cur.c === undefined || cur.c === '' ? '' : String(cur.c);
+  const seenBuff = new Set();
+  const buffNames = [];
+  for (const b of (S.keywords?.buffs || [])) {
+    const zh = String(b.zh || b.native || b.name || '');
+    for (const id of (Array.isArray(b.ids) ? b.ids : [b.id])) { if (!id || seenBuff.has(id)) continue; seenBuff.add(id); buffNames.push({ id: String(id), zh }); }
+  }
+  const buffOpts = buffNames.slice(0, 5000).map((b) => '<option value="' + esc(b.id) + '" label="' + esc((b.zh ? b.zh + ' · ' : '') + b.id) + '">' + esc((b.zh ? b.zh + ' · ' : '') + b.id) + '</option>').join('');
+  return '<div class="mb-t-form">'
+    + '<label class="field"><span>基础选择器</span><select id="mb-t-base"><option value="">（自定义表达式）</option>' + baseOpts + '</select></label>'
+    + '<div class="grid-2"><label class="field"><span>单位 ID（id####，留空不用）</span><input id="mb-t-id" value="' + esc(idHit ? idHit[1] : '') + '" placeholder="例如 10101"></label>'
+    + '<label class="field"><span>实例 ID（inst####，留空不用）</span><input id="mb-t-inst" value="' + esc(instHit ? instHit[1] : '') + '" placeholder="例如 123"></label></div>'
+    + '<label class="field"><span>数量（留空 = 1；多目标可填 1–999 或 VALUE_0）</span><input id="mb-t-count" value="' + esc(count) + '" placeholder="例如 3 或 VALUE_0"></label>'
+    + '<div class="field"><span>修饰标签（可多选）</span><div class="mb-t-tags">' + tagHtml + '</div></div>'
+    + '<label class="field"><span>$ 关键词检查（可选，只保留带该 Buff 的单位）</span><input id="mb-t-buff" list="mb-t-bufflist" value="' + esc(dollar) + '" placeholder="例如 Combustion"></label>'
+    + '<datalist id="mb-t-bufflist">' + buffOpts + '</datalist>'
+    + '<label class="field"><span>自定义表达式（填了就忽略上面的基础选择器，例如 EveryAlly+ExceptSelf）</span><input id="mb-t-expr" value="' + esc(expr) + '" placeholder="EveryAlly+ExceptSelf"></label>'
+    + '<div class="hint muted">数量直接拼在目标名末尾（EveryAlly3）；标签直接连写；+ 用于并集，$关键词 放在最后。</div>'
+    + '</div>';
+}
+
+function mbReadTargetModal() {
+  const base = document.getElementById('mb-t-base')?.value || '';
+  const expr = (document.getElementById('mb-t-expr')?.value || '').trim();
+  const countRaw = (document.getElementById('mb-t-count')?.value || '').trim();
+  const idRaw = (document.getElementById('mb-t-id')?.value || '').trim();
+  const instRaw = (document.getElementById('mb-t-inst')?.value || '').trim();
+  const dollar = (document.getElementById('mb-t-buff')?.value || '').trim();
+  const tags = [...document.querySelectorAll('.mb-tag:checked')].map((el) => el.value);
+  let n = expr;
+  if (!n) {
+    if (/^\d+$/.test(idRaw)) n = 'id' + idRaw;
+    else if (/^\d+$/.test(instRaw)) n = 'inst' + instRaw;
+    else n = base + tags.join('');
+  }
+  if (dollar && n.indexOf('$') < 0) n += '$' + dollar.replace(/^\$/, '');
+  return { t: 'target', n, c: countRaw === '' ? null : countRaw };
+}
+function openMbEdit(chain) {
+  const ref = mbAccess(chain);
+  if (!ref) return;
+  const cur = ref.get() || {};
+  const isTarget = cur.t === 'target';
+  if (isTarget) {
+    modal({
+      title: '编辑目标选择器',
+      body: mbTargetModalBody(cur),
+      footer: '<button class="btn ghost" data-act="close-modal">取消</button><button class="btn primary" data-act="mb-edit-ok" data-chain="' + esc(chain) + '">确定</button>',
+    });
+    return;
+  }
+  const value = cur.v ?? '';
+  modal({
+    title: '修改数值',
+    body: '<label class="field"><span>值</span><input id="mb-edit-input" value="' + esc(String(value)) + '"></label>',
+    footer: '<button class="btn ghost" data-act="close-modal">取消</button><button class="btn primary" data-act="mb-edit-ok" data-chain="' + esc(chain) + '">确定</button>',
+  });
+  setTimeout(() => { const i = document.getElementById('mb-edit-input'); if (i) { i.focus(); i.select(); } }, 30);
+}
+
+async function mbSaveProps() {
+  const m = S.mbDoc;
+  if (!m || m.test) return;
+  const val = (sel) => document.querySelector(sel)?.value;
+  const res = await api('/api/module/save', {
+    method: 'POST',
+    body: { id: m.id, name: val('#mb-name'), prefix: val('#mb-prefix'), kind: val('#mb-kind'), desc: val('#mb-desc') },
+  });
+  S.mbDoc = res.module;
+  S.modules = (await api('/api/modules')).modules;
+  render();
+}
+
+Object.assign(actions, {
+  'close-module': () => { mbLeaveGuard(() => { S.moduleEditing = null; S.mb = null; S.mbDoc = null; render(); }); },
+  'mb-leave-discard': () => { S.mb.saved = JSON.stringify(S.mb.program); const t = S.mb.leave; closeModal(); if (t) t(); },
+  'mb-leave-missing-ok': () => { const t = S.mb && S.mb.leave; closeModal(); mbGuardDirty(t); },
+  'mb-leave-save': async () => {
+    const t = S.mb && S.mb.leave;
+    let ok = false; try { ok = await actions['mb-save'](); } catch (err) { toast('保存失败：' + (err && err.message ? err.message : err), 'err'); return; }
+    if (ok === false) return;
+    closeModal(); if (t) t();
+  },
+  'mb-cat': (el) => { S.mb.cat = el.dataset.cat; render(); },
+  'mb-props': () => { S.mb.showProps = !S.mb.showProps; render(); },
+  'mb-script': () => { S.mb.showScript = !S.mb.showScript; render(); },
+  'mb-toggle-panic': () => { S.mb.showPanic = !S.mb.showPanic; render(); },
+  'mb-clear': () => {
+    if (!confirm('清空这个模块里的全部积木？（清空后可以用撤销还原）')) return;
+    mbSnapshot();
+    S.mb.program = { version: 1, blocks: [] };
+    render();
+  },
+  'mb-save': async () => {
+    const info = mbMissingInfo();
+    let res = null;
+    const body = { id: S.moduleEditing, program: S.mb.program, expectUpdatedAt: S.mb.savedAt || '', force: !!S.mb.forceSave };
+    try { res = await api('/api/module/program', { method: 'POST', body }); }
+    catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      if (!S.mb.forceSave && /已被修改/.test(msg) && window.confirm('模块文件在磁盘上已被修改（可能是另一个窗口，或有人直接改了文件）。要用当前内容覆盖吗？')) {
+        S.mb.forceSave = true;
+        return actions['mb-save']();
+      }
+      throw err;
+    }
+    if (!res || res.ok === false) { toast((res && res.error) || '保存失败', 'err'); return false; }
+    S.mb.saved = JSON.stringify(S.mb.program);
+    S.mb.savedAt = (res.module && res.module.updatedAt) || '';
+    S.mb.hist = [];
+    S.mb.redo = [];
+    S.mb.forceSave = false;
+    S.mb.dirty = false;
+    S.mb.showMissing = info.list.length > 0;
+    S.mb.missingIds = info.ids;
+    S.mbDoc = res.module;
+    S.modules = (await api('/api/modules')).modules;
+    render();
+    if (info.list.length) {
+      toast('已保存；有 ' + info.list.length + ' 处必填参数未填，游戏里很可能无法正确执行（控件右上角有红点）', 'warn');
+      mbFlashMissing();
+    } else {
+      toast('模块已保存');
+    }
+    return true;
+  },
+  'mb-del': (el) => { mbRemove(el.dataset.mbDel); render(); },
+  'mb-clear-slot': (el) => { mbClearSlot(el.dataset.mbClear); render(); },
+  'mb-edit': (el) => {
+    const chain = el.dataset.mbEdit;
+    const ref = mbAccess(chain);
+    const cur = ref && ref.get();
+    if (!cur || cur.t !== 'n') return;
+    openMbEdit(chain);
+  },
+  'mb-custom-target': (el) => {
+    const mode = el.dataset.mbMode;
+    const chain = el.dataset.chain || '';
+    const blank = { t: 'target', n: '', c: null };
+    modal({
+      title: mode === 'loop' ? '自定义循环目标' : '自定义目标选择器',
+      body: mbTargetModalBody(blank),
+      footer: '<button class="btn ghost" data-act="close-modal">取消</button><button class="btn primary" data-act="mb-custom-target-ok" data-mode="' + esc(mode || 'target') + '" data-chain="' + esc(chain) + '">确定</button>',
+    });
+  },
+  'mb-custom-target-ok': (el) => {
+    const picked = mbReadTargetModal();
+    if (!picked.n) { toast('目标不能为空', 'warn'); return; }
+    if (el.dataset.chain) { if (mbSetSlot(el.dataset.chain, picked)) { closeModal(); render(); } return; }
+    if (el.dataset.mode === 'loop') S.mb.carry = { type: 'stmt', node: { k: 'loop', v: picked.n + (picked.c === null ? '' : String(picked.c)) } };
+    else S.mb.carry = { type: 'value', node: picked };
+    closeModal();
+    render();
+  },
+  'mb-edit-ok': (el) => {
+    const chain = el.dataset.chain;
+    const ref = mbAccess(chain);
+    if (ref) {
+      const cur = ref.get() || {};
+      if (cur.t === 'target') ref.set(mbReadTargetModal());
+      else {
+        const raw = document.getElementById('mb-edit-input')?.value ?? '';
+        if (cur.t === 'n') ref.set({ ...cur, v: Math.trunc(Number(raw) || 0) });
+        else ref.set({ ...cur, v: raw });
+      }
+    }
+    closeModal();
+    render();
+  },
+});
+
+mbBindDrag();
+mbBindEmptySlot();
+const mbClickBind = true;
+document.addEventListener('click', (e) => {
+  if (!S.mb || !S.mbDoc) return;
+  if (S.mb.suppressClick && Date.now() - S.mb.suppressClick < 350) return;
+  const vbox = e.target.closest('.vb');
+  if (vbox && !e.target.closest('[data-mb-del],[data-mb-edit],[data-mb-mathadd],[data-mb-mathdel],select,input')) {
+    const vchain = vbox.dataset.chain || '';
+    const vref = vchain ? mbAccess(vchain) : null;
+    const vcur = vref && vref.get();
+    if (vcur && (vcur.t === 'n' || vcur.t === 's')) {
+      e.preventDefault();
+      mbInlineEdit(vbox, vchain, vcur.t === 'n' ? 'num' : 'text', vcur.v);
+      return;
+    }
+  }
+  const del = e.target.closest('[data-mb-del]');
+  if (del) { e.preventDefault(); mbRemove(del.dataset.mbDel); render(); return; }
+  const mAdd = e.target.closest('[data-mb-mathadd]');
+  if (mAdd) {
+    const ref = mbAccess(mAdd.dataset.mbMathadd);
+    const node = ref && ref.get();
+    if (node && node.t === 'math') { node.tail = node.tail || []; if (node.tail.length < 8) node.tail.push({ op: '+', val: null }); render(); }
+    return;
+  }
+  const mDel = e.target.closest('[data-mb-mathdel]');
+  if (mDel) {
+    const ref = mbAccess(mDel.dataset.mbMathdel);
+    const node = ref && ref.get();
+    if (node && node.t === 'math' && node.tail && node.tail.length) { node.tail.pop(); render(); }
+    return;
+  }
+  const clr = e.target.closest('[data-mb-clear]');
+  if (clr) { e.preventDefault(); mbClearSlot(clr.dataset.mbClear); render(); return; }
+  const ed = e.target.closest('[data-mb-edit]');
+  if (ed) { e.preventDefault(); openMbEdit(ed.dataset.mbEdit); return; }
+  if (!S.mb.carry && !e.target.closest('button,select,input,.slot,.vb,.bk-body')) {
+    const bk = e.target.closest('[data-mb-bk]');
+    if (bk) { S.mb.sel = bk.dataset.mbBk; render(); return; }
+  }
+  if (e.target.closest('[data-mb-drag]')) { mbPaletteClick(e); return; }
+  if (S.mb.carry) { mbCanvasClick(e); return; }
+  const slotEl = e.target.closest('[data-mb-slot]');
+  if (slotEl && slotEl.classList.contains('slot')) {
+    const st = slotEl.dataset.slotType || 'any';
+    if (st === 'num' || st === 'text') { mbInlineEdit(slotEl, slotEl.dataset.mbSlot, st, null); return; }
+    toast('从左侧把「' + (MB_TYPE_ZH[st] || '对应类型') + '」积木拖进这个空位');
+    return;
+  }
+}, true);
+
+document.addEventListener('keydown', (e) => {
+  const inField = e.target instanceof Element && e.target.closest('input,textarea,select,[contenteditable="true"]');
+  if (S.mb && !inField && (e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'z') {
+    e.preventDefault(); if (e.shiftKey) mbRedo(); else mbUndo(); return;
+  }
+  if (S.mb && !inField && (e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'y') {
+    e.preventDefault(); mbRedo(); return;
+  }
+  if (e.key === 'Backspace' && S.mb && S.mb.sel && !inField) {
+    e.preventDefault(); mbBackspace(); return;
+  }
+  if (e.key !== 'Escape') return;
+  if (!S.mb) return;
+  let changed = false;
+  if (S.mb.carry) { S.mb.carry = null; changed = true; }
+  if (S.mb.drag) { S.mb.drag = null; changed = true; }
+  if (changed) { render(); toast('\u5df2\u53d6\u6d88', 'warn'); }
+});
+
+document.addEventListener('change', (e) => {
+  if (!S.mb || !S.mbDoc) return;
+    const argSel = e.target.closest('[data-mb-arg]');
+    if (argSel) {
+      const ref = mbAccess(argSel.dataset.mbArg);
+      if (ref) {
+        const val = argSel.value;
+        ref.set(val === '' ? null : { t: 's', v: val });
+        refreshMbScript();
+      }
+      return;
+    }
+  const op = e.target.closest('[data-mb-op]');
+  if (op) { const n = mbStmt(op.dataset.mbOp); if (n) n.op = op.value; render(); return; }
+  const faceEl = e.target.closest('[data-mb-face]');
+  if (faceEl) { const n = mbStmt(faceEl.dataset.mbFace); if (n) n.face = faceEl.value; render(); return; }
+  const critEl = e.target.closest('[data-mb-crit]');
+  if (critEl) { const n = mbStmt(critEl.dataset.mbCrit); if (n) n.crit = critEl.value; render(); return; }
+  const kwEl = e.target.closest('[data-mb-kw]');
+  if (kwEl) { const n = mbStmt(kwEl.dataset.mbKw); if (n) n.kw = kwEl.value.trim(); refreshMbScript(); return; }
+  const varEl = e.target.closest('[data-mb-var]');
+  if (varEl) { const n = mbStmt(varEl.dataset.mbVar); if (n) n.var = varEl.value; render(); return; }
+  const mathOp = e.target.closest('[data-mb-mathop]');
+  if (mathOp) {
+    const ref = mbAccess(mathOp.dataset.mbMathop);
+    const node = ref && ref.get();
+    if (node && node.tail && node.tail[Number(mathOp.dataset.mbIdx)]) {
+      node.tail[Number(mathOp.dataset.mbIdx)].op = mathOp.value;
+      refreshMbScript(); return;
+    }
+  }
+  const keyEl = e.target.closest('[data-mb-key]');
+  if (keyEl) { const n = mbStmt(keyEl.dataset.mbKey); if (n) n.key = keyEl.value.trim(); refreshMbScript(); return; }
+});
+
+function refreshMbScript() {
+  const el = document.getElementById('mb-script');
+  if (el) el.textContent = mbCompileScript();
+}
 
 function renderPassiveArea(back) {
   const q = (S.passiveSearch || '').trim().toLowerCase();
@@ -2226,14 +3855,16 @@ function openRiskGeneric(items, commit) {
 
 /* --------------------------- 模块 / 被动 / Buff 创建 --------------------------- */
 
-function openNewModule() {
-  const timings = S.keywords?.timings || [];
-  const kinds = S.keywords?.moduleKinds || [];
-  const opt = (arr, v) => arr.map((x) => '<option value="' + esc(x.id) + '"' + (String(x.id) === String(v) ? ' selected' : '') + '>' + esc(x.zh || x.id) + '</option>').join('');
+async function openNewModule() {
+  await ensureScopes();
+  const order = ['passive', 'skill', 'buff', 'common'];
+  const scopes = ((S.scopeTables && S.scopeTables.list) || [{ id: 'common', zh: '通用', desc: '' }]).slice()
+    .sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+  const scopePick = scopes.map((x) => '<label class="scope-opt"><input type="radio" name="nm-scope" value="' + esc(x.id) + '"' + (x.id === 'common' ? ' checked' : '') + '><b>' + esc(x.zh) + '</b><span>' + esc(x.desc || '') + '</span></label>').join('');
   modal({
     title: '新建模块',
     body: '<div class="form">'
-      + '<label class="field"><span>类型</span><select id="nm-kind">' + opt(kinds, 'skill') + '</select></label>'
+      + '<div class="field"><span>为谁创建（决定可用的时点 / 函数）</span><div class="scope-pick">' + scopePick + '</div></div>'
       + '<label class="field"><span>名称</span><input id="nm-name" placeholder="例如：施加烧伤" autocomplete="off"></label>'
       + '<label class="field"><span>描述（可执行词条）</span><textarea id="nm-desc" class="desc-input" rows="4" placeholder="例如：[使用时]对目标施加2层[烧伤]"></textarea></label>'
       + '<div class="hint muted">模块目前只存在于编辑器内，不落到游戏脚本。</div></div>',
@@ -2244,10 +3875,10 @@ function openNewModule() {
 async function submitCreateModule() {
   const name = document.getElementById('nm-name')?.value?.trim() || '';
   const desc = document.getElementById('nm-desc')?.value || '';
-  const kind = document.getElementById('nm-kind')?.value || 'skill';
+  const scope = document.querySelector('input[name="nm-scope"]:checked')?.value || 'common';
   if (!name) { toast('请填模块名称', 'warn'); return; }
   try {
-    const res = await api('/api/module/create', { method: 'POST', body: { name, desc, kind } });
+    const res = await api('/api/module/create', { method: 'POST', body: { name, desc, scope } });
     closeModal();
     S.modulesLoaded = false;
     await loadModules(true);
@@ -2263,9 +3894,9 @@ async function saveModule() {
   const name = document.getElementById('mod-name')?.value?.trim() || '';
   const desc = document.getElementById('mod-desc')?.value || '';
   const prefix = document.getElementById('mod-prefix')?.value || '';
-  const kind = document.getElementById('mod-kind')?.value || 'skill';
+  const scope = document.getElementById('mod-scope')?.value || (m.scope || 'common');
   try {
-    await api('/api/module/save', { method: 'POST', body: { id: m.id, name, desc, prefix, kind } });
+    await api('/api/module/save', { method: 'POST', body: { id: m.id, name, desc, prefix, scope } });
     await loadModules(true);
     toast('模块已保存', 'ok');
     render();
@@ -2274,16 +3905,17 @@ async function saveModule() {
 
 async function deleteModule() {
   const m = (S.modules || []).find((x) => x.id === S.moduleEditing);
-  if (!m || m.test) return;
+  if (!m) return;
+  const isTest = !!m.test;
   modal({
-    title: '删除模块',
-    body: '<p>确定删除模块「' + esc(m.name || m.id) + '」？</p><div class="hint muted">已引用它的技能 / 被动 / Buff 会显示成一个空引用。</div>',
-    footer: '<button class="btn ghost" data-act="close-modal">取消</button><button class="btn danger" data-act="confirm-delete-module" data-id="' + esc(m.id) + '">删除</button>',
+    title: isTest ? '删除测试模块' : '删除模块',
+    body: '<p>确定删除' + (isTest ? '测试模块' : '模块') + '「' + esc(m.name || m.id) + '」？</p><div class="hint muted">' + (isTest ? '删除后会写入「不再自动生成测试模块」标记，之后启动不会再冒出来。' : '已引用它的技能 / 被动 / Buff 会显示成一个空引用。') + '</div>',
+    footer: '<button class="btn ghost" data-act="close-modal">取消</button><button class="btn danger" data-act="confirm-delete-module" data-id="' + esc(m.id) + '" data-test="' + (isTest ? '1' : '0') + '">删除</button>',
   });
 }
 
 async function confirmDeleteModule(el) {
-  await api('/api/module/delete', { method: 'POST', body: { id: el.dataset.id } });
+  await api('/api/module/delete', { method: 'POST', body: { id: el.dataset.id, allowTest: el.dataset.test === '1' } });
   closeModal();
   S.moduleEditing = null;
   await loadModules(true);
@@ -2426,7 +4058,7 @@ async function pickImportBuff(el) {
 /* --------------------------------- 动作注册 --------------------------------- */
 
 Object.assign(actions, {
-  'open-module': (el) => { S.moduleEditing = el.dataset.id; render(); },
+  'open-module': async (el) => { await openModuleEditor(el.dataset.id); },
   'new-module': () => openNewModule(),
   'submit-create-module': () => submitCreateModule(),
   'save-module': () => saveModule(),
@@ -2448,4 +4080,68 @@ Object.assign(actions, {
   'save-buff': () => saveBuffCurrent().catch((e) => toast(e.message, 'error')),
   'import-buff': () => openImportBuff(),
   'pick-import-buff': (el) => pickImportBuff(el),
+});
+
+Object.assign(actions, {
+  'desc-kw-insert': () => {
+    const pick = document.getElementById('desc-kw');
+    const ta = document.getElementById('skill-desc');
+    const word = pick ? String(pick.value || '').trim() : '';
+    if (!word) { toast('先选一个关键词（时点或 Buff 的中文名）', 'warn'); return; }
+    if (!ta) return;
+    const token = '[' + word.replace(/[\[\]\r\n]/g, '') + ']';
+    const start = ta.selectionStart == null ? ta.value.length : ta.selectionStart;
+    const end = ta.selectionEnd == null ? start : ta.selectionEnd;
+    ta.value = ta.value.slice(0, start) + token + ta.value.slice(end);
+    ta.focus();
+    const pos = start + token.length;
+    try { ta.setSelectionRange(pos, pos); } catch {}
+    if (pick) pick.value = '';
+    scheduleDesc();
+  },
+  'mb-undo': () => mbUndo(),
+  'mb-redo': () => mbRedo(),
+  'mb-loop-slot': (el) => {
+    const chain = el.dataset.chain || '';
+    const ref = mbAccess(chain);
+    const cur = ref && ref.get();
+    if (cur && (cur.t === 'target' || cur.v)) {
+      mbSnapshot();
+      ref.set(null);
+      render();
+      toast('已清空遍历目标；需要时从左侧「目标」分类把「遍历（自定义目标）」拖回来');
+      return;
+    }
+    toast('从左侧「目标」分类把「遍历（自定义目标）」拖到这个槽里');
+  },
+  'mb-cond-add': (el) => {
+    const st = mbStmt(el.dataset.chain);
+    if (!st) return;
+    mbSnapshot();
+    st.conds = Array.isArray(st.conds) && st.conds.length ? st.conds : [{ left: null, op: '>', right: null }];
+    if (st.conds.length >= 8) { toast('最多 8 个条件', 'warn'); return; }
+    st.conds.push({ left: null, op: '>', right: null });
+    render();
+  },
+  'mb-cond-del': (el) => {
+    const raw = String(el.dataset.chain || '');
+    const k = raw.lastIndexOf(':');
+    const st = mbStmt(raw.slice(0, k));
+    const idx = Number(raw.slice(k + 1));
+    if (!st || !Array.isArray(st.conds) || st.conds.length <= 1) return;
+    mbSnapshot();
+    st.conds.splice(idx, 1);
+    render();
+  },
+});
+
+document.addEventListener('change', (e) => {
+  const el = e.target && e.target.closest ? e.target.closest('[data-mb-logic]') : null;
+  if (!el || !S.mb) return;
+  const st = mbStmt(el.dataset.mbLogic);
+  if (!st) return;
+  mbSnapshot();
+  st.logic = ['none', 'and', 'or', 'xor'].includes(el.value) ? el.value : 'none';
+  if (!Array.isArray(st.conds) || !st.conds.length) st.conds = [{ left: null, op: '>', right: null }];
+  render();
 });

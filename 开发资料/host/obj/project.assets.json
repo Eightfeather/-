@@ -435,11 +435,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "E:\\辅助文件\\Mod编辑器\\编辑器正式稿V0.1\\开发资料\\host\\TheLetheWorkbench.csproj",
+      "projectUniqueName": "E:\\辅助文件\\Mod编辑器\\编辑器正式稿\\开发资料\\host\\TheLetheWorkbench.csproj",
       "projectName": "TheLetheWorkbench",
-      "projectPath": "E:\\辅助文件\\Mod编辑器\\编辑器正式稿V0.1\\开发资料\\host\\TheLetheWorkbench.csproj",
+      "projectPath": "E:\\辅助文件\\Mod编辑器\\编辑器正式稿\\开发资料\\host\\TheLetheWorkbench.csproj",
       "packagesPath": "C:\\Users\\31117\\.nuget\\packages\\",
-      "outputPath": "E:\\辅助文件\\Mod编辑器\\编辑器正式稿V0.1\\开发资料\\host\\obj\\",
+      "outputPath": "E:\\辅助文件\\Mod编辑器\\编辑器正式稿\\开发资料\\host\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "D:\\VSCShare\\NuGetPackages"
