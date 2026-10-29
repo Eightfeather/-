@@ -8,6 +8,12 @@ node_modules/
 *.suo
 *.log
 
+# 二进制改由 GitHub Releases 分发，仓库只放源码
+/TheLetheWorkbench.exe
+*.exe
+*.dll
+*.exe.gz
+
 # 本机临时脚本
 开发资料/_*.mjs
 开发资料/probe-*.mjs
