@@ -137,3 +137,8 @@ test/run.mjs       自测
 说明：更多细节见 `docs/`。
 
 - 模块用途：新建模块时选择「被动 / 技能 / Buff / 通用」，编辑器按用途过滤可用的时点与函数，保存时后端校验。
+
+## 发布（GitHub Releases）
+
+- 仓库只放源码；成品 exe 通过 GitHub Releases 分发（每版一个 tag + 一个 zip）。
+- 发布命令：`node tools/release.mjs`（需要 `GITHUB_TOKEN`），细节见 `docs/15-发布流程-GitHub-Releases.md`。
