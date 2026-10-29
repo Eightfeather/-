@@ -27,6 +27,8 @@ import { ARG_OPTIONAL } from '../knowledge/arg-optional.mjs';
 import { COMMANDS, ACQUIRERS, CONSEQUENCES, modularStats } from '../knowledge/modular-tables.mjs';
 import { SCOPES, TIMING_SCOPE, COMMAND_SCOPE, TIMING_CONTAINERS, COMMAND_CONTAINERS } from '../knowledge/scopes.mjs';
 import { createApi } from './api-shared.mjs';
+import { compileProgram, compileTimingRows } from '../lethe/program.mjs';
+import { saveCompiledBuff, saveCompiledPassive, saveCompiledSkill } from '../lethe/apply.mjs';
 
 export function buildApi(ctx) {
   const { state, log, session, autosave } = ctx;
@@ -512,6 +514,49 @@ export function buildApi(ctx) {
       const { letheRoot } = need();
       const one = writeModuleProgram(letheRoot, body.id, body.program, { expectUpdatedAt: body.expectUpdatedAt, force: !!body.force });
       return { ok: true, module: one };
+    },
+
+    'GET /api/module/compiled': (q) => {
+      const { letheRoot } = need();
+      const one = getModule(letheRoot, q.get('id'));
+      if (!one) { const e = new Error('找不到这个模块'); e.status = 404; throw e; }
+      return { ok: true, id: one.id, lines: compileProgram(one.program), rows: compileTimingRows(one.program), manual: one.program.manual || {} };
+    },
+
+    'POST /api/skill/apply': (body) => {
+      const { letheRoot } = need();
+      const id = String(body.id);
+      const meta = readSkillMeta(letheRoot, body.name, id);
+      const res = saveCompiledSkill(letheRoot, {
+        name: body.name, id,
+        displayName: body.displayName,
+        info: meta.info || {}, code: meta.code || {},
+        description: meta.description, coinDescs: meta.coinDescs,
+      });
+      session.clear(body.name, 'skill:' + id);
+      autosave.touch(body.name);
+      log ? log('[wb] 技能已写回 ' + body.name + '/' + id + '（' + res.scripts + ' 个脚本）') : 0;
+      return { ok: true, applied: res.scripts, missing: res.missing || [], backups: res.backups || [], written: res.written || [] };
+    },
+
+    'POST /api/passive/apply': (body) => {
+      const { letheRoot } = need();
+      const id = String(body.id);
+      const meta = readPassiveMeta(letheRoot, body.name, id);
+      const res = saveCompiledPassive(letheRoot, { name: body.name, id, displayName: body.displayName, info: meta.info || {}, code: meta.code || {}, description: meta.description });
+      session.clear(body.name, 'passive:' + id);
+      autosave.touch(body.name);
+      return { ok: true, applied: res.scripts, missing: res.missing || [], backups: res.backups || [] };
+    },
+
+    'POST /api/buff/apply': (body) => {
+      const { letheRoot } = need();
+      const id = String(body.id);
+      const meta = readBuffMeta(letheRoot, body.name, id);
+      const res = saveCompiledBuff(letheRoot, { name: body.name, id, displayName: body.displayName, info: meta.info || {}, code: meta.code || {}, description: meta.description });
+      session.clear(body.name, 'buff:' + id);
+      autosave.touch(body.name);
+      return { ok: true, applied: res.scripts, missing: res.missing || [], backups: res.backups || [] };
     },
 
     'POST /api/module/delete': (body) => {

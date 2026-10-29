@@ -12,7 +12,7 @@ import { EditSession } from '../lethe/session.mjs';
 import { AutoSaver } from '../lethe/autosave.mjs';
 import { markCleanExit, markRunning } from '../lethe/state.mjs';
 
-export const VERSION = '0.6.7';
+export const VERSION = '0.7.0';
 const WEB_ROOT = join(SRC_DIR, 'web');
 
 export function createServer({ token, state, log, session, autosave } = {}) {

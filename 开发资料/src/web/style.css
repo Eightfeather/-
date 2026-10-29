@@ -691,3 +691,64 @@ body.mb-dragging, body.mb-dragging * { cursor: grabbing !important; user-select:
 .desc-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0 4px}
 .desc-tools input{width:220px}
 .desc-tools .muted{font-size:11px}
+
+/* ---------- 模块列表页（v0.7） ---------- */
+.module-wrap { grid-template-columns: minmax(0, 1fr); }
+.module-list { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
+.module-row { display: flex; align-items: stretch; gap: 6px; }
+.module-row .mod-open {
+  flex: 1 1 auto; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+  color: var(--text); text-align: left; cursor: pointer;
+}
+.module-row .mod-open:hover { border-color: var(--gold); background: #2a2119; }
+.module-row.test .mod-open { border-style: dashed; }
+.module-row .mod-name { font-weight: 600; }
+.module-row .mod-meta { display: inline-flex; align-items: center; gap: 6px; }
+.module-row .mod-gear {
+  flex: 0 0 38px; border: 1px solid var(--line); border-radius: 6px; background: #1b1613;
+  color: var(--muted); font-size: 15px; cursor: pointer;
+}
+.module-row .mod-gear:hover { color: var(--gold); border-color: var(--gold); }
+
+/* ---------- Buff 折叠 ---------- */
+.mb-fold { margin-bottom: 8px; }
+.mb-fold > summary {
+  cursor: pointer; padding: 4px 6px; color: var(--gold); font-size: 12px; letter-spacing: .04em;
+  border-bottom: 1px dashed rgba(198, 161, 91, .25); margin-bottom: 4px;
+}
+.mb-fold > summary::marker { color: var(--gold); }
+
+/* ---------- 必填三重标识：金色边框 + 淡金底色 + 徽标 ---------- */
+.slot.slot-req { border-color: rgba(198, 161, 91, .5); background: rgba(198, 161, 91, .07); }
+.slot.slot-req:hover { border-color: var(--gold); background: rgba(198, 161, 91, .13); }
+.slot.slot-req .slot-flag-req { color: #e8b95f; }
+
+/* ---------- 遍历卡（内嵌目标） ---------- */
+.mb-item.mi-loop { display: block; padding: 8px 10px; border-left-color: #8a6d2f; }
+.mi-loop-head { display: flex; flex-direction: column; gap: 2px; }
+.mi-loop .slot-loop-card { display: block; margin-top: 6px; min-height: 26px; }
+.mb-item.mi-loop.has-target .slot-loop-card { border-color: var(--gold); }
+
+/* ---------- 手改锁定的时点块 ---------- */
+.bk.locked { opacity: .72; filter: grayscale(.35); border-style: dashed; }
+.bk.locked .bk-lock {
+  position: absolute; right: 6px; top: -12px; font-size: 11px; color: var(--gold);
+  background: #1a1512; border: 1px solid rgba(198, 161, 91, .5); border-radius: 4px; padding: 1px 4px;
+}
+
+/* ---------- 输出代码页 ---------- */
+.code-page { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 24px; overflow: auto; }
+.code-hint { color: var(--muted); font-size: 12px; border-left: 2px solid var(--gold); padding-left: 8px; }
+.code-row { border: 1px solid var(--line); border-radius: 6px; background: #171310; }
+.code-row-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.code-row-idx { color: var(--muted); font-size: 12px; }
+.code-text {
+  width: 100%; box-sizing: border-box; background: transparent; border: 0; color: #e7d9bd;
+  font: 12.5px/1.5 ui-monospace, Consolas, monospace; padding: 8px 10px; resize: vertical; outline: none;
+}
+.code-text[readonly] { color: #bda98a; }
+.code-text:focus { background: #1d1712; }
+
+/* 手改锁定：内部不可编辑（只能整块拖走 / 删除） */
+.bk.locked .bk-body, .bk.locked .mb-hat-args, .bk.locked .mb-loop-wrap, .bk.locked .bk-if-conds { pointer-events: none; }

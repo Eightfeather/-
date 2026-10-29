@@ -1,0 +1,18 @@
+# 依赖与构建中间物（不进仓库；需要时本地重建）
+node_modules/
+开发资料/build/
+开发资料/dist/
+开发资料/host/obj/
+开发资料/host/bin/
+*.user
+*.suo
+*.log
+
+# 本机临时脚本
+开发资料/_*.mjs
+开发资料/probe-*.mjs
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store

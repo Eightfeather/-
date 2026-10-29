@@ -492,7 +492,19 @@ export function normalizeProgram(raw) {
   const budget = { nodes: 0 };
   const blocks = Array.isArray(raw && raw.blocks) ? raw.blocks : [];
   const out = foldLegacyLoops(blocks.map((x) => pushStmt(x, 0, budget)).filter(Boolean));
-  return { version: 1, blocks: out };
+  const manual = {};
+  const src = raw && raw.manual && typeof raw.manual === 'object' ? raw.manual : {};
+  let n = 0;
+  for (const key of Object.keys(src)) {
+    if (n >= 200) break;
+    if (!/^\d+$/.test(key)) continue;
+    const v = String(src[key] || '');
+    if (!v) continue;
+    if (v.length > 4000) throw new SafetyError('手改代码过长（上限 4000 字符）');
+    manual[key] = v;
+    n++;
+  }
+  return { version: 1, blocks: out, manual };
 }
 
 /** 统计程序里的语句块数量（给列表展示用） */

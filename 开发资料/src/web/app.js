@@ -1646,7 +1646,8 @@ async function saveCurrent() {
 async function commitSkill() {
   const res = await api('/api/skill/save', { method: 'POST', body: { name: S.selected, id: S.skillId } });
   S.session = res.session;
-  toast('已保存，撤销历史已清空', 'ok');
+  const applied = await api('/api/skill/apply', { method: 'POST', body: { name: S.selected, id: S.skillId } });
+  toast('已保存并写入游戏文件（' + (applied.applied || 0) + ' 条脚本' + ((applied.missing || []).length ? '，缺 ' + applied.missing.length + ' 个模块' : '') + '）', 'ok');
   render();
 }
 
@@ -1927,13 +1928,48 @@ function renderModulePanel(searchId, value) {
 
 function renderModuleArea(back) {
   if (S.moduleEditing && S.mb && S.mbDoc) return renderModuleEditor(back);
-  const rows = (S.modules || []).map((m) => '<button class="item ' + (S.moduleEditing === m.id ? 'active' : '') + '" data-act="open-module" data-id="' + esc(m.id) + '">'
-    + '<div class="item-main"><strong>' + esc(m.name || m.id) + '</strong><small>' + esc(m.id) + (m.test ? ' · 测试' : '') + (m.blockCount ? ' · ' + m.blockCount + ' 块' : '') + '</small></div></button>').join('');
-  return '<div class="pane-head">' + back + '<div><h2>模块编辑</h2><p class="muted">可执行词条块 · 由技能 / 被动 / Buff 引用</p></div></div>'
-    + '<div class="module-wrap"><section class="panel"><div class="panel-head">模块 <span class="count">' + (S.modules || []).length + '</span></div>'
-    + '<div class="panel-body list">' + (rows || '<div class="list-empty">还没有模块</div>') + '</div>'
-    + '<div class="panel-foot"><button class="btn ghost block" data-act="new-module">＋ 新建模块</button></div></section>'
-    + renderModuleForm() + '</div>';
+  const scopes = (S.scopeTables && S.scopeTables.list) || [];
+  const scopeLabel = (id) => {
+    const hit = scopes.find((x) => x.id === (id || 'common'));
+    return hit ? hit.zh : (id || '通用');
+  };
+  const rows = (S.modules || []).map((m) => '<div class="module-row' + (m.test ? ' test' : '') + '">'
+    + '<button class="mod-open" data-act="open-module" data-id="' + esc(m.id) + '">'
+    + '<span class="mod-name">' + esc(m.name || m.id) + '</span>'
+    + '<span class="mod-meta"><span class="tag">' + esc(scopeLabel(m.scope)) + '</span>'
+    + (m.test ? '<span class="tag warn">测试</span>' : '')
+    + '<span class="muted">' + (m.blockCount || 0) + ' 块</span></span>'
+    + '</button>'
+    + '<button class="mod-gear" data-act="mb-props" data-id="' + esc(m.id) + '" title="模块信息 / 删除">⚙</button>'
+    + '</div>').join('');
+  const count = (S.modules || []).length;
+  return '<div class="pane-head">' + back + '<div><h2>模块编辑</h2><p class="muted">积木式脚本 · 由技能 / 被动 / Buff 引用</p></div></div>'
+    + '<div class="module-wrap"><section class="panel"><div class="panel-head">模块 <span class="count">' + count + '</span></div>'
+    + '<div class="panel-body list module-list">' + (rows || '<div class="list-empty">还没有模块</div>') + '</div>'
+    + '<div class="panel-foot"><button class="btn ghost block" data-act="new-module">＋ 新建</button></div></section></div>';
+}
+
+async function openModuleProps(id) {
+  const mid = String(id || (S.mbDoc && S.mbDoc.id) || '');
+  if (!mid) return;
+  let m = (S.modules || []).find((x) => x.id === mid) || null;
+  if (!m) {
+    const d = await api('/api/module?id=' + encodeURIComponent(mid));
+    m = d.module;
+  }
+  const scopes = (S.scopeTables && S.scopeTables.list) || [{ id: 'common', zh: '通用', desc: '' }];
+  const ro = m.test ? ' disabled' : '';
+  modal({
+    title: '模块信息',
+    body: '<div class="form">'
+      + '<label class="field"><span>模块名称</span><input id="mp-name" value="' + esc(m.name || '') + '"' + ro + '></label>'
+      + '<label class="field"><span>用途</span><select id="mp-scope"' + ro + '>' + scopes.map((k) => '<option value="' + esc(k.id) + '"' + (String(k.id) === String(m.scope || 'common') ? ' selected' : '') + '>' + esc(k.zh) + (k.desc ? ' · ' + esc(k.desc) : '') + '</option>').join('') + '</select></label>'
+      + '<label class="field"><span>描述（可执行词条）</span><textarea id="mp-desc" rows="4" class="desc-input">' + esc(m.desc || '') + '</textarea></label>'
+      + '<div class="hint muted">模块 id：' + esc(m.id) + ' · 积木 ' + (m.blockCount || 0) + ' 块</div>'
+      + '</div>',
+    footer: '<button class="btn ghost" data-act="close-modal">关闭</button>'
+      + (m.test ? '<button class="btn danger" data-act="mb-props-delete" data-id="' + esc(m.id) + '" data-test="1">删除测试模块</button>' : '<button class="btn danger" data-act="mb-props-delete" data-id="' + esc(m.id) + '">删除模块</button><button class="btn ok" data-act="mb-props-save" data-id="' + esc(m.id) + '">保存</button>'),
+  });
 }
 
 function renderModuleForm() {
@@ -2290,7 +2326,7 @@ function mbStmt(idStr) {
 function mbValHtml(v, chain, slotType, opt) {
   const st = slotType || 'any';
   const stAttr = ' data-slot-type="' + esc(st) + '" title="' + esc((MB_TYPE_ZH[st] || MB_TYPE_ZH.any) + (opt ? ' · 可选参数，可留空' : '')) + '"';
-  if (!v) return '<span class="slot' + (opt ? ' slot-opt' : '') + ' slot-t-' + esc(st) + '"' + stAttr + ' data-mb-empty="1" data-mb-slot="' + esc(chain) + '"><i><b class="' + (opt ? 'slot-flag-opt">可选' : 'slot-flag-req">必填') + '</b>' + esc(MB_TYPE_ZH[st] || '.') + '</i></span>';
+  if (!v) return '<span class="slot' + (opt ? ' slot-opt' : ' slot-req') + ' slot-t-' + esc(st) + '"' + stAttr + ' data-mb-empty="1" data-mb-slot="' + esc(chain) + '"><i><b class="' + (opt ? 'slot-flag-opt">可选' : 'slot-flag-req">必填') + '</b>' + esc(MB_TYPE_ZH[st] || '.') + '</i></span>';
   const inner = (() => {
     if (v.t === 'target') return esc(mbTargetLabel(v));
     if (v.t === 'var') return esc(v.n);
@@ -2370,7 +2406,9 @@ function mbStmtHtml(b, idStr) {
     const kids = (b.body || []).map((x, i) => mbStmtHtml(x, idStr + '.' + i)).join('');
     const loopNode = b.loop && (b.loop.t === 'target' || b.loop.v) ? b.loop : null;
     const loopLabel = loopNode ? (mbTargetLabel(loopNode) + (loopNode.c ? ' · 数量 ' + loopNode.c : '')) : '无';
-    return '<div class="bk hat bk-timing' + selCls(idStr) + '" data-mb-bk="' + esc(idStr) + '">' + mbDotHtml(idStr)
+    const locked = mbIsLocked(idStr);
+    return '<div class="bk hat bk-timing' + selCls(idStr) + (locked ? ' locked' : '') + '" data-mb-bk="' + esc(idStr) + '"' + (locked ? ' title="这一行已被手动改写：积木已锁定，只能整块移动或删除"' : '') + '>' + mbDotHtml(idStr)
+      + (locked ? '<span class="bk-lock" title="已被手改锁定">🔒</span>' : '')
       + '<div class="bk-hat-head"><span class="bk-hat-ico">⚑</span><span class="bk-hat-name">' + esc(zh) + '</span>'
       + '<span class="mb-loop-wrap"><span class="mb-loop-label">遍历</span>'
       + '<button class="mb-loop-slot' + (loopNode ? ' on' : '') + '" data-act="mb-loop-slot" data-mb-loop="' + esc(idStr) + ':loop" data-chain="' + esc(idStr) + ':loop" title="本行整段脚本的 Target 会被逐个替换（引擎的 LOOP 是整条脚本级）；点一下清空">' + esc(loopLabel) + '</button></span>'
@@ -2430,7 +2468,7 @@ function mbStackHtml(pathId) {
 function mbPaletteHtml() {
   const q = (S.mb.search || '').trim().toLowerCase();
   const cat = S.mb.cat;
-  const chips = { timing: '时点', target: '目标', buff: 'Buff', var: 'VALUE', action: '效果', acq: '获取', cond: 'IF' };
+  const chips = { timing: '时点', target: '目标', action: '效果', acq: '获取', cond: 'IF', var: 'VALUE', buff: 'Buff' };
   const tabs = Object.entries(chips).map(([k, label]) => '<button class="mb-cat' + (cat === k ? ' active' : '') + '" data-act="mb-cat" data-cat="' + k + '">' + label + '</button>').join('');
   let items = [];
   const match = (s) => !q || String(s || '').toLowerCase().includes(q);
@@ -2448,7 +2486,11 @@ function mbPaletteHtml() {
       }
     }
     items.push('<button class="mb-item mi-target" data-act="mb-custom-target"><b>自定义目标…</b><small>基础选择器 + 排序 / 队伍 / 排除 / 数量</small></button>');
-    items.unshift('<button class="mb-item mi-loop" data-mb-drag="value" data-mb-kind="loop" data-mb-val="EveryEnemy"><b>遍历（自定义目标）</b><small>LOOP：拖到时点块右侧的「遍历 无」槽里</small></button>');
+    const lt = S.mb.loopTarget;
+    const ltHtml = lt ? esc(mbTargetLabel(lt)) : '<i><b class="slot-flag-req">必填</b>目标</i>';
+    items.unshift('<div class="mb-item mi-loop' + (lt ? ' has-target' : '') + '" data-mb-drag="value" data-mb-kind="loop" role="button" tabindex="0">'
+      + '<div class="mi-loop-head"><b>遍历（自定义目标）</b><small>拖到时点右侧「遍历」槽 · 目标拖进下面空位</small></div>'
+      + '<span class="slot slot-req slot-loop-card" data-mb-slot="palette:loop" title="拖一个目标积木到这里">' + ltHtml + '</span></div>');
   } else if (cat === 'var') {
     items = MB_VARS.filter((v) => match(v))
       .map((v) => '<button class="mb-item mi-var" data-mb-drag="value" data-mb-kind="var" data-mb-val="' + esc(v) + '"><b>' + esc(v) + '</b><small>通用数值寄存器</small></button>');
@@ -2466,21 +2508,19 @@ function mbPaletteHtml() {
   } else if (cat === 'buff') {
     const all = (S.keywords?.buffs || []).flatMap((b) => (Array.isArray(b.ids) ? b.ids : [b.id]).map((id) => ({ id: String(id || ''), zh: b.zh || '', native: b.native || '', source: b.source || 'vanilla', panic: !!b.panic, icon: b.icon || null })));
     const seen = new Set();
-    const uniq = all.filter((b) => { if (!b.id || seen.has(b.id)) return false; seen.add(b.id); return true; });
-    const showPanic = !!S.mb.showPanic;
-    const hidden = uniq.filter((b) => b.panic);
+    const uniq = all.filter((b) => { if (!b.id || b.panic || seen.has(b.id)) return false; seen.add(b.id); return true; });
     const iconHtml = (b) => b.icon
-          ? '<img class="mb-bicon" loading="lazy" alt="" src="/api/sprite?mod=' + encodeURIComponent(b.icon.mod) + '&file=' + encodeURIComponent(b.icon.file) + '&t=' + encodeURIComponent(window.__WB_TOKEN__ || '') + '">'
-          : '<span class="mb-bicon ph">' + esc(String(b.zh || b.native || b.id || '?').slice(0, 1)) + '</span>';
+      ? '<img class="mb-bicon" loading="lazy" alt="" src="/api/sprite?mod=' + encodeURIComponent(b.icon.mod) + '&file=' + encodeURIComponent(b.icon.file) + '&t=' + encodeURIComponent(window.__WB_TOKEN__ || '') + '">'
+      : '<span class="mb-bicon ph">' + esc(String(b.zh || b.native || b.id || '?').slice(0, 1)) + '</span>';
     const pick = (b) => '<button class="mb-item mi-buff" data-mb-drag="value" data-mb-kind="s" data-mb-val="' + esc(b.id) + '">' + iconHtml(b) + '<span class="mb-btxt"><b>' + esc(b.zh || b.native || b.id) + '</b><small>' + esc(b.id + (b.source === 'mod' ? ' · 本 Mod' : '')) + '</small></span></button>';
-    const vis = uniq.filter((b) => (!b.panic || showPanic) && (match(b.id) || match(b.zh) || match(b.native)));
+    const vis = uniq.filter((b) => match(b.id) || match(b.zh) || match(b.native));
     const mine = vis.filter((b) => b.source === 'mod');
     const vanilla = vis.filter((b) => b.source !== 'mod');
-    items = [];
-    if (mine.length) { items.push('<div class="mb-group">本 MOD 的 Buff（' + mine.length + '）</div>'); for (const b of mine) items.push(pick(b)); }
-    items.push('<div class="mb-group">原版 Buff（' + vanilla.length + '）</div>');
-    for (const b of vanilla) items.push(pick(b));
-    if (!q) items.push('<button class="mb-item mb-toggle" data-act="mb-toggle-panic"><b>' + (showPanic ? '隐藏' : '显示') + '恐慌 / 低理智条目</b><small>共 ' + hidden.length + ' 条，不应当作普通 Buff 施加</small></button>');
+    const fold = (label, list, open) => list.length
+      ? '<details class="mb-fold"' + (open ? ' open' : '') + '><summary>' + label + '（' + list.length + '）</summary>' + list.map(pick).join('') + '</details>'
+      : '';
+    items = [fold('本 MOD 的 Buff', mine, true), fold('原版 Buff', vanilla, false)];
+    if (!mine.length && !vanilla.length) items = ['<div class="mb-empty2">没有匹配的 Buff</div>'];
   } else {
     items = mbRows('acquirer').filter((r) => r.name !== 'math' && scopeAllowsCommand(r.name) && (match(r.name) || match(r.summary) || (r.aliasOf || []).some((a) => match(a))))
       .map((r) => '<button class="mb-item mi-acq" data-mb-drag="value" data-mb-kind="acq" data-mb-val="' + esc(r.name) + '"><b>' + esc(r.name) + '()</b><small>' + esc((r.summary || '（英文原文档未收录说明）') + ((r.aliasOf && r.aliasOf.length) ? '（旧称：' + r.aliasOf.join(' / ') + '）' : '')) + '</small></button>');
@@ -2497,11 +2537,11 @@ function mbPaletteHtml() {
 function mbToolbarHtml() {
   const m = S.mbDoc || {};
   return '<div class="pane-head mb-h"><div class="mb-crumb"><button class="btn ghost sm" data-act="close-module">← 返回</button>'
-    + '<h2>' + esc(m.name || m.id) + '</h2>' + (m.test ? '<span class="tag warn">测试模块 · 只读</span>' : '')
+    + '<h2>' + esc(m.name || m.id) + '</h2>'
     + '<span class="tag">用途：' + esc(scopeZhOf(m.scope || 'common')) + '</span>'
-    + '<span class="muted mb-prefix">' + esc(m.prefix || '未指定时点') + '</span></div><span class="spacer"></span>'
-    + '<button class="btn ghost sm" data-act="mb-props">属性</button>'
-    + '<button class="btn ghost sm" data-act="mb-script">' + (S.mb.showScript ? '隐藏脚本' : '查看脚本') + '</button>'
+    + (m.test ? '<span class="tag warn">测试模块 · 只读</span>' : '')
+    + '</div><span class="spacer"></span>'
+    + '<button class="btn ghost sm" data-act="mb-code">查看输出代码</button>'
     + '<button class="btn ghost sm" data-act="mb-undo"' + ((S.mb.hist || []).length ? '' : ' disabled') + ' title="撤销 (Ctrl+Z)">↶ 撤销</button>'
     + '<button class="btn ghost sm" data-act="mb-redo"' + ((S.mb.redo || []).length ? '' : ' disabled') + ' title="重做 (Ctrl+Y)">↷ 重做</button>'
     + '<button class="btn ghost sm" data-act="mb-clear">清空</button>'
@@ -2607,7 +2647,7 @@ function mbLoopRowCount() {
   return ((S.mb && S.mb.program && S.mb.program.blocks) || []).filter((b) => b && b.k === 'timing' && b.loop && b.loop.n).length;
 }
 
-function mbCompileScript() {
+function mbCompileRows() {
   const val = (v, nested) => {
     if (!v) return '_';
     if (v.t === 'target') {
@@ -2667,26 +2707,119 @@ function mbCompileScript() {
     const nonEmpty = parts.filter((x) => x && x !== 'None').length > 0;
     return 'TIMING:' + b.v + (nonEmpty ? '(' + parts.join(',') + ')' : '');
   };
-  const rows = [];
-  for (const b of (S.mb.program.blocks || [])) {
+  const groups = [];
+  const blocks = (S.mb.program && S.mb.program.blocks) || [];
+  for (let bi = 0; bi < blocks.length; bi++) {
+    const b = blocks[bi];
     if (!b) continue;
-    if (b.k === 'timing') { rows.push({ hat: b, items: (b.body || []).slice() }); continue; }
-    if (!rows.length) rows.push({ hat: null, items: [] });
-    rows[rows.length - 1].items.push(b);
+    if (b.k === 'timing') { groups.push({ key: String(bi), hat: b, items: (b.body || []).slice() }); continue; }
+    if (!groups.length) groups.push({ key: null, hat: null, items: [] });
+    groups[groups.length - 1].items.push(b);
   }
-  const parts = [];
-  for (const r of rows) {
+  const manual = (S.mb.program && S.mb.program.manual) || {};
+  const out = [];
+  for (const r of groups) {
+    const override = r.key !== null && manual[r.key] !== undefined ? String(manual[r.key]) : '';
+    if (override) { out.push({ key: r.key, text: override, manual: true }); continue; }
+    const parts = [];
     if (r.hat) {
       parts.push(hatText(r.hat));
       if (r.hat.loop && r.hat.loop.n) parts.push('LOOP:' + val(r.hat.loop, true));
     }
     for (const it of r.items) { const t = stmt(it); if (t) parts.push(t); }
+    if (!parts.length) continue;
+    out.push({ key: r.key, text: 'Modular/' + parts.join('/'), manual: false });
   }
-  if (!parts.length) return '// 还没有积木';
-  return 'Modular/' + parts.join('/');
+  return out;
+}
+
+/** 兼容旧调用：把每行脚本用换行拼起来（每行都是一条完整脚本） */
+function mbCompileScript() {
+  const rows = mbCompileRows();
+  return rows.length ? rows.map((r) => r.text).join('\n') : '// 还没有积木';
+}
+
+/** 该行（根层时点块）是否已被手改锁定 */
+function mbIsLocked(idStr) {
+  const key = String(idStr || '');
+  if (!/^\d+$/.test(key)) return false;
+  const manual = (S.mb && S.mb.program && S.mb.program.manual) || {};
+  return manual[key] !== undefined && manual[key] !== '';
+}
+
+function mbLockRow(key) {
+  const row = mbCompileRows().find((r) => String(r.key) === String(key));
+  if (!row) return;
+  mbSnapshot();
+  const manual = { ...(S.mb.program.manual || {}) };
+  manual[String(key)] = row.text;
+  S.mb.program = { ...S.mb.program, manual };
+  render();
+  toast('这一行已改为手改模式，对应积木已锁定', 'warn');
+}
+
+async function saveModuleProgram(quiet) {
+  const info = mbMissingInfo();
+  let res = null;
+  const body = { id: S.moduleEditing, program: S.mb.program, expectUpdatedAt: S.mb.savedAt || '', force: !!S.mb.forceSave };
+  try { res = await api('/api/module/program', { method: 'POST', body }); }
+  catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    if (/已被修改/.test(msg) && !S.mb.forceSave) {
+      if (!confirm('模块文件在磁盘上已被修改（可能别的窗口/别的程序动过）。要用当前画布覆盖吗？')) return false;
+      S.mb.forceSave = true;
+      return saveModuleProgram(quiet);
+    }
+    toast(msg, 'bad');
+    return false;
+  }
+  S.mb.forceSave = false;
+  S.mb.savedAt = (res.module && res.module.updatedAt) || '';
+  S.mb.saved = JSON.stringify(S.mb.program);
+  S.mb.hist = [];
+  S.mb.redo = [];
+  S.modules = (await api('/api/modules')).modules;
+  if (!quiet) {
+    if (info.list.length) {
+      S.mb.showMissing = true;
+      toast('已保存；有 ' + info.list.length + ' 处必填参数未填，可能无法正确执行', 'warn');
+      mbFlashMissing();
+    } else {
+      S.mb.showMissing = false;
+      toast('模块已保存', 'ok');
+    }
+  }
+  render();
+  return true;
+}
+
+function renderMbCodePage() {
+  const rows = mbCompileRows();
+  const manual = (S.mb.program && S.mb.program.manual) || {};
+  const body = rows.map((r, i) => {
+    const key = r.key === null || r.key === undefined ? '' : String(r.key);
+    const locked = key !== '' && manual[key] !== undefined;
+    return '<div class="code-row">'
+      + '<div class="code-row-head"><span class="code-row-idx">第 ' + (i + 1) + ' 行</span>'
+      + (locked
+        ? '<span class="tag warn">已手改 · 积木已锁定</span>'
+        : '<button class="btn ghost sm" data-act="mb-code-lock" data-key="' + esc(key) + '">手动修改</button>')
+      + '</div>'
+      + '<textarea class="code-text" data-key="' + esc(key) + '" rows="2" spellcheck="false"' + (locked ? '' : ' readonly') + '>' + esc(r.text) + '</textarea>'
+      + '</div>';
+  }).join('') || '<div class="list-empty">还没有积木</div>';
+  return '<div class="pane-head mb-h"><div class="mb-crumb"><button class="btn ghost sm" data-act="mb-code-back">← 返回积木</button><h2>输出代码</h2></div><span class="spacer"></span>'
+    + '<button class="btn primary sm" data-act="mb-code-save">保存代码</button></div>'
+    + '<div class="code-page"><div class="code-hint">每行是一条独立脚本（可直接核对游戏里看到的样子）。点「手动修改」后该行对应的时点积木会被锁定，只能在积木页整块移动或删除。</div>'
+    + body + '</div>';
 }
 
 function renderModuleEditor(back) {
+  if (S.mb && S.mb.codePage) return renderMbCodePage();
+  return renderModuleEditorInner(back);
+}
+
+function renderModuleEditorInner(back) {
   if (!S.mb || !S.mbDoc) {
     return '<div class="pane-head">' + back + '<div><h2>模块编辑</h2></div></div><div class="mb-loading">正在载入模块…</div>';
   }
@@ -2758,7 +2891,7 @@ function mbPayloadFrom(el) {
     if (kind === 'cons') return { type: 'stmt', node: { k: 'cons', n: val, a: new Array(mbArgCount('consequence', val)).fill(null) } };
     if (kind === 'assign') return { type: 'stmt', node: { k: 'assign', var: 'VALUE_0', val: null } };
   } else {
-    if (kind === 'loop') return { type: 'value', loop: true, node: { t: 'target', n: val || 'EveryEnemy', c: null } };
+    if (kind === 'loop') return { type: 'value', loop: true, node: (S.mb && S.mb.loopTarget) ? S.mb.loopTarget : null };
     if (kind === 'target') return { type: 'value', node: { t: 'target', n: val, c: null } };
     if (kind === 'var') return { type: 'value', node: { t: 'var', n: val } };
     if (kind === 'n') return { type: 'value', node: { t: 'n', v: Number(val) || 0 } };
@@ -2901,6 +3034,10 @@ function mbAllowsPlace(stackId, index, node) {
   return { ok: true, msg: '' };
 }
 function mbInsert(stackId, index, node) {
+  try {
+    const host = document.querySelector('[data-stack="' + String(stackId) + '"]');
+    if (host && host.closest('.bk.locked')) { toast('这一行已被手改锁定：只能整块移动或删除', 'warn'); return false; }
+  } catch (e) {}
   if (!node) return false;
   const root = String(stackId || 'root') === 'root';
   const list = root ? ((S.mb && S.mb.program && S.mb.program.blocks) || []) : mbStackAt(String(stackId).split('.').map(Number));
@@ -3008,11 +3145,20 @@ function mbDropResolve(x, y, payload) {
   if (!el) return false;
   const geoSlot = mbSlotAt(x, y);
   if (payload.loop) {
+    if (!payload.node) { toast('先往「遍历（自定义目标）」卡片里拖一个目标，再把它拖进时点右侧的遍历槽', 'warn'); return false; }
     const slotEl = el.closest('[data-mb-loop]') || (geoSlot && geoSlot.closest('[data-mb-loop]'));
     if (!slotEl) { toast('遍历块只能放到时点块右侧的「遍历」槽里', 'warn'); return false; }
     return mbSetSlot(slotEl.dataset.mbLoop, payload.node);
   }
   const slot = el.closest('.slot') || el.closest('[data-mb-slot]') || geoSlot;
+  if (slot && mbSlotChain(slot) === 'palette:loop') {
+    const node = payload && payload.node ? payload.node : null;
+    if (!node || mbValueType(node) !== 'target') { toast('这里只能放目标积木（把「目标」里的任意一个拖进来）', 'warn'); return false; }
+    S.mb.loopTarget = node;
+    render();
+    toast('遍历目标已设为 ' + mbTargetLabel(node), 'ok');
+    return true;
+  }
   if (payload.type === 'value') {
     if (!slot) return false;
     const want = slot.dataset.slotType || 'any';
@@ -3159,6 +3305,12 @@ function mbCanvasClick(e) {
   }
   const slot = e.target.closest('.slot') || e.target.closest('[data-mb-slot]') || geoSlot;
   const stackEl = e.target.closest('[data-stack]');
+  if (slot && mbSlotChain(slot) === 'palette:loop') {
+    const node = carry && carry.node ? carry.node : null;
+    if (!node || mbValueType(node) !== 'target') { toast('这里只能放目标积木', 'warn'); return false; }
+    S.mb.loopTarget = node; S.mb.carry = null; render(); toast('遍历目标已设为 ' + mbTargetLabel(node), 'ok'); return true;
+  }
+  if (carry.loop && !carry.node) { toast('先往「遍历（自定义目标）」卡片里拖一个目标', 'warn'); return false; }
   if (carry.type === 'value') {
     if (!slot) return false;
     const want = slot.dataset.slotType || 'any';
@@ -3376,7 +3528,69 @@ Object.assign(actions, {
     closeModal(); if (t) t();
   },
   'mb-cat': (el) => { S.mb.cat = el.dataset.cat; render(); },
-  'mb-props': () => { S.mb.showProps = !S.mb.showProps; render(); },
+  'mb-props': async (el) => { await openModuleProps(el && el.dataset ? el.dataset.id : ''); },
+  'mb-props-save': async (el) => {
+    const id = el.dataset.id;
+    const res = await api('/api/module/save', { method: 'POST', body: {
+      id, name: $('#mp-name').value, scope: $('#mp-scope').value, desc: $('#mp-desc').value,
+    } });
+    S.modules = (await api('/api/modules')).modules;
+    if (S.mbDoc && S.mbDoc.id === id) { S.mbDoc = res.module; S.mb = { ...S.mb, doc: res.module }; }
+    closeModal();
+    toast('模块信息已保存', 'ok');
+    render();
+  },
+  'mb-props-delete': async (el) => {
+    const id = el.dataset.id;
+    const isTest = el.dataset.test === '1';
+    if (!confirm(isTest ? '删除这个测试模块？（删除后不会再自动生成）' : '删除这个模块？此操作不能撤销。')) return;
+    await api('/api/module/delete', { method: 'POST', body: { id, allowTest: isTest } });
+    S.modules = (await api('/api/modules')).modules;
+    closeModal();
+    if (S.moduleEditing === id) { S.moduleEditing = null; S.mb = null; S.mbDoc = null; }
+    toast('模块已删除', 'warn');
+    render();
+  },
+  'mb-code': () => { S.mb.codePage = true; render(); },
+  'mb-code-back': () => { S.mb.codePage = false; render(); },
+  'mb-code-save': async () => {
+    const boxes = Array.from(document.querySelectorAll('.code-text'));
+    const manual = {};
+    for (const box of boxes) {
+      const key = box.dataset.key;
+      if (!key || box.readOnly) continue;
+      manual[key] = box.value;
+    }
+    S.mb.program = { ...S.mb.program, manual };
+    S.mb.codePage = false;
+    await actions['mb-save']();
+  },
+  'mb-code-lock': (el) => {
+    const key = String(el.dataset.key || '');
+    if (!/^\d+$/.test(key)) return;
+    const row = mbCompileRows().find((r) => String(r.key) === key);
+    if (!row) return;
+    if (!S.mb.manualWarned) {
+      modal({
+        title: '手动修改这一行代码',
+        body: '<p><strong>你正在手动修改「' + esc(row.text.slice(0, 40)) + '…」这一行的输出代码。</strong></p>'
+          + '<div class="person-list"><div class="check-row"><span>· 手动修改后，这一行对应的时点积木会被<b>锁定</b>，在积木页只能整块移动或删除，不能再改里面的参数。</span></div>'
+          + '<div class="check-row"><span>· 编辑器不会再用积木内容覆盖这一行；改错了只能自己改回来（没有一键还原）。</span></div>'
+          + '<div class="check-row"><span>· 建议只有在积木表达不了时才手改。</span></div></div>'
+          + '<label class="field check"><input type="checkbox" id="mb-manual-skip"> 本次打开编辑器内不再提示</label>',
+        footer: '<button class="btn ghost" data-act="close-modal">返回</button><button class="btn warn" data-act="mb-code-lock-ok" data-key="' + esc(key) + '">我明白，手动修改</button>',
+      });
+      return;
+    }
+    mbLockRow(key);
+  },
+  'mb-code-lock-ok': (el) => {
+    const skip = document.getElementById('mb-manual-skip');
+    if (skip && skip.checked) S.mb.manualWarned = true;
+    const key = String(el.dataset.key || '');
+    closeModal();
+    mbLockRow(key);
+  },
   'mb-script': () => { S.mb.showScript = !S.mb.showScript; render(); },
   'mb-toggle-panic': () => { S.mb.showPanic = !S.mb.showPanic; render(); },
   'mb-clear': () => {
@@ -3822,7 +4036,8 @@ async function commitPassive() {
   await flushPInfo();
   const res = await api('/api/passive/save', { method: 'POST', body: { name: S.selected, id: S.passiveId } });
   S.session = res.session;
-  toast('已保存，撤销历史已清空', 'ok');
+  const applied = await api('/api/passive/apply', { method: 'POST', body: { name: S.selected, id: S.passiveId } });
+  toast('已保存并写入游戏文件（' + (applied.applied || 0) + ' 条被动脚本）', 'ok');
   render();
 }
 
@@ -3838,7 +4053,8 @@ async function commitBuff() {
   await flushBInfo();
   const res = await api('/api/buff/save', { method: 'POST', body: { name: S.selected, id: S.buffId } });
   S.session = res.session;
-  toast('已保存，撤销历史已清空', 'ok');
+  const applied = await api('/api/buff/apply', { method: 'POST', body: { name: S.selected, id: S.buffId } });
+  toast('已保存并写入游戏文件（' + (applied.applied || 0) + ' 条 Buff 脚本）', 'ok');
   render();
 }
 
@@ -3882,9 +4098,8 @@ async function submitCreateModule() {
     closeModal();
     S.modulesLoaded = false;
     await loadModules(true);
-    S.moduleEditing = res.module.id;
     toast('模块已创建', 'ok');
-    render();
+    await openModuleEditor(res.module.id);
   } catch (e) { toast(e.message, 'error'); }
 }
 
