@@ -6,11 +6,12 @@ import { lcwDir, legacyDir, backupsDir, userBackupsDir, autoBackupsDir, dllBacku
 export const STATE_NAME = 'state.json';
 export const DEFAULT_EDITOR_NAME = '但丁';
 
-/** 编辑器数据根（LCW）。禁用目录仍留在旧位置，避免已禁用的 Mod 被移动两次。 */
+/** 编辑器数据根（LCW）。禁用目录也已并入 LCW（LCW/disabled/{mods,dlls}）。 */
 export function workbenchDir(letheRoot) { return lcwDir(letheRoot); }
 export function statePath(letheRoot) { return lcwStatePath(letheRoot); }
-export function disabledModsDir(letheRoot) { return join(legacyDir(letheRoot), 'disabled', 'mods'); }
-export function disabledDllsDir(letheRoot) { return join(legacyDir(letheRoot), 'disabled', 'dlls'); }
+export function disabledRoot(letheRoot) { return join(lcwDir(letheRoot), 'disabled'); }
+export function disabledModsDir(letheRoot) { return join(disabledRoot(letheRoot), 'mods'); }
+export function disabledDllsDir(letheRoot) { return join(disabledRoot(letheRoot), 'dlls'); }
 
 /** 目录拆分：backups/用户保存、backups/自动保存、journal（内部回滚与操作流水） */
 export { backupsDir, userBackupsDir, autoBackupsDir, dllBackupsDir, journalDir };

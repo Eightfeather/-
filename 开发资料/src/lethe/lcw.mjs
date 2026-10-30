@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 
 /** 编辑器数据根目录名（位于私服 Lethe 目录下，每个私服一份，天然隔离） */
 export const LCW_NAME = 'LCW';
-/** 旧版内部目录（现在只剩 disabled 仍在用） */
+/** 旧版内部目录（迁到 LCW 后即可删除，仅作为迁移来源） */
 export const LEGACY_NAME = '.lethe-workbench';
 
 export function lcwDir(letheRoot) { return join(letheRoot, LCW_NAME); }
@@ -36,6 +36,8 @@ export const README_TEXT = [
   '                ☆ 可删，但删了就没法回滚。',
   '  journal/      撤销流水与写盘回滚副本（崩溃恢复用）。',
   '                ★ 编辑器运行期间不要动；不运行时删除只是让撤销历史丢失。',
+  '  disabled/     被禁用、暂时移出 mods/ 的 Mod（disabled/mods）与被禁用的插件（disabled/dlls）。',
+  '                ★ 不要手动删，删了这些 Mod 就找不回来了（可在编辑器「Mod 管理」里重新启用）。',
   '  exports/      将来「导出到 Mod」的产物目录（现在未启用）。',
   '  logs/         编辑器侧日志（迁移、写盘失败等）。',
   '  state.json    编辑器状态（编辑器名、哪些 Mod/DLL 被禁用）。',
@@ -133,6 +135,7 @@ export function migrateToLcw(letheRoot, log) {
       [join(legacy, 'backups'), backupsDir(letheRoot)],
       [join(legacy, 'journal'), journalDir(letheRoot)],
       [join(legacy, 'meta'), projectsDir(letheRoot)],
+      [join(legacy, 'disabled'), join(lcwDir(letheRoot), 'disabled')],
       [join(legacy, 'session.json'), sessionPath(letheRoot)],
       [join(legacy, 'state.json'), statePath(letheRoot)],
     ];
@@ -154,13 +157,16 @@ export function migrateToLcw(letheRoot, log) {
         rmIfEmpty(join(base, 'LetheWorkbench', 'projects'));
       }
     }
-    // 清理旧目录（只删已搬空的，disabled 保持原样）
-    for (const d of [join(legacy, 'backups'), join(legacy, 'journal'), join(legacy, 'meta')]) {
+    // 清理旧目录（搬空后连根目录一起删）
+    for (const d of [join(legacy, 'backups'), join(legacy, 'journal'), join(legacy, 'meta'), join(legacy, 'disabled')]) {
       if (fs.existsSync(d)) { fs.rmSync(d, { recursive: true, force: true }); removed.push(d); }
     }
     for (const f of [join(legacy, 'session.json'), join(legacy, 'state.json')]) {
       if (fs.existsSync(f)) { fs.rmSync(f, { force: true }); removed.push(f); }
     }
+    rmIfEmpty(legacy);
+    if (fs.existsSync(legacy)) report('旧目录仍有残留，未删除：' + legacy);
+    else if (removed.length) removed.push(legacy);
     if (removed.length) report(`已删除旧位置：${removed.join(' , ')}`);
     if (moved.length) writeReadme(letheRoot);
     return { moved, removed, error: '' };

@@ -23,7 +23,7 @@ export const SRC_DIR = (() => {
 const HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
 export const USER_DATA_DIR = process.env.LOCALAPPDATA
   ? join(process.env.LOCALAPPDATA, 'LetheWorkbench')
-  : join(HOME, '.lethe-workbench');
+  : join(HOME, '.lethe-creator-workshop');
 
 export const LOG_DIR = join(USER_DATA_DIR, 'logs');
 export const RUNTIME_DIR = join(USER_DATA_DIR, 'runtime');

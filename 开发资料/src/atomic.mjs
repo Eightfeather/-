@@ -2,7 +2,6 @@ import * as fs from 'node:fs';
 import { basename, dirname, join, sep } from 'node:path';
 import { MAX_FILE_BYTES } from './safety.mjs';
 
-export const BACKUP_DIRNAME = '.lethe-workbench';
 export const BACKUP_KEEP = 20;
 
 export function stamp(date = new Date()) {

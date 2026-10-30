@@ -116,7 +116,7 @@ function build(letheRoot) {
   try { mods = fs.readdirSync(modsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()); } catch { mods = []; }
   for (const m of mods) scanRoot(join(modsRoot, m.name), { source: 'mod', mod: m.name, disabled: false }, out);
   // 被禁用的 Mod
-  const disRoot = join(letheRoot, '.lethe-workbench', 'disabled', 'mods');
+  const disRoot = join(letheRoot, 'LCW', 'disabled', 'mods');
   let dis = [];
   try { dis = fs.readdirSync(disRoot, { withFileTypes: true }).filter((e) => e.isDirectory()); } catch { dis = []; }
   for (const m of dis) scanRoot(join(disRoot, m.name), { source: 'mod', mod: m.name, disabled: true }, out);
