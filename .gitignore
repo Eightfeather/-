@@ -22,3 +22,5 @@ node_modules/
 Thumbs.db
 desktop.ini
 .DS_Store
+# 发布打包产物（走 GitHub Releases，不入库）
+.release/
