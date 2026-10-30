@@ -40,6 +40,9 @@ const S = {
   dragging: null,
   descCheck: null,
   imp: null,
+  // ---- v0.5 界面 ----
+  sinnerPicked: false,     // 人格编辑：false = 12 罪人立绘卡；true = 该罪人的人格卡列表
+  listCollapsed: false,    // 编辑页左侧 Mod 列表收起；持久化在 config.json 的 ui.listCollapsed（端口每次随机，不能用 localStorage）
 };
 window.__WBS = S; // 调试用：CDP 里可直接检查前端状态
 
@@ -121,6 +124,7 @@ function closeModal() {
 
 async function loadStatus() {
   S.status = await api('/api/status');
+  S.listCollapsed = Boolean(S.status.ui?.listCollapsed);
   $('#st-version').textContent = `v${S.status.version}`;
 }
 
@@ -153,7 +157,9 @@ async function loadPersonalities(name = S.selected) {
 
 async function loadVanilla(characterId) {
   const res = await api(`/api/vanilla${characterId ? `?characterId=${characterId}` : ''}`);
-  S.vanilla = { ...(S.vanilla || {}), ...res };
+  // 没有原版数据时接口会回空罪人表，别让它盖掉已有的 12 罪人兜底
+  const keepChars = !(res.characters && res.characters.length) && S.vanilla?.characters?.length;
+  S.vanilla = { ...(S.vanilla || {}), ...res, ...(keepChars ? { characters: S.vanilla.characters } : {}) };
   return res;
 }
 
@@ -162,7 +168,12 @@ async function loadPersonality(name, id) {
   S.personality = res.personality;
   S.personalityId = id;
   S.sessionKey = `personality:${id}`;
+  S.pSearch = {};
+  S.pSkillQ = '';
+  S.pDefQ = '';
+  S.pBuffQ = '';
   await refreshSession(name);
+  await loadPersonalityExtra();
   return S.personality;
 }
 
@@ -233,6 +244,10 @@ function render() {
     updateDock();
     return;
   }
+  // 状态已是新页面：先算出切换类型，并在重绘前把旧画面拓一份“残影”，用来播放退场
+  const snap = navSnapshot();
+  const tr = transitionFor(S._navSnap, snap);
+  const ghost = captureGhost(tr);
   const scrollMap = S._lastView === S.view ? captureScrollMap() : null;
   S._lastView = S.view;
   if (S.view === 'home') view.innerHTML = renderHome();
@@ -241,6 +256,150 @@ function render() {
   else view.innerHTML = renderImport();
   updateDock();
   restoreScrollMap(scrollMap);
+  S._navSnap = snap;
+  if (tr) playEnter(tr, ghost);
+}
+
+/* ------------------------------ 界面切换动画 ------------------------------ */
+// 只给“新进来的内容”播入场动画；方向表示去向：底栏/页签按顺序左右滑，进入下一层从下方升起，返回上一层从上方落下
+
+const VIEW_ORDER = ['home', 'mods', 'edit', 'import'];
+
+function navDepth() {
+  if (S.view !== 'edit' || !S.editKind) return 0;
+  if (S.editKind === 'personality') return S.personality ? 3 : (S.sinnerPicked ? 2 : 1);
+  // 模块：列表 1 → 积木画布 2 → 输出代码页 3（画布内拖拽、改参数不改变深度，不会触发切页动画）
+  if (S.editKind === 'module') return S.moduleEditing ? (S.mb && S.mb.codePage ? 3 : 2) : 1;
+  return 1;
+}
+
+function navSnapshot() {
+  return {
+    view: S.view,
+    kind: S.view === 'edit' ? S.editKind : null,
+    depth: navDepth(),
+    detail: S.view === 'mods' ? `${S.selectedDll || S.selected || ''}|${S.selectedDll ? S.dllTab : S.detailTab}` : null,
+  };
+}
+
+function transitionFor(prev, next) {
+  if (!prev) return null;
+  if (prev.view !== next.view) {
+    return { scope: 'view', dir: VIEW_ORDER.indexOf(next.view) > VIEW_ORDER.indexOf(prev.view) ? 'right' : 'left' };
+  }
+  if (next.view === 'mods' && prev.detail !== next.detail) return { scope: 'detail', dir: 'fade' };
+  if (next.view !== 'edit') return null;
+  if (prev.kind !== next.kind) {
+    if (!prev.kind) return { scope: 'pane', dir: 'deeper' };
+    if (!next.kind) return { scope: 'pane', dir: 'back' };
+    const a = WIZARDS.findIndex((w) => w.kind === prev.kind);
+    const b = WIZARDS.findIndex((w) => w.kind === next.kind);
+    return { scope: 'pane', dir: b > a ? 'right' : 'left' };
+  }
+  if (prev.depth !== next.depth) return { scope: 'pane', dir: next.depth > prev.depth ? 'deeper' : 'back' };
+  return null;
+}
+
+/*
+ * 仿原版切页三段式（录屏实测约 0.45s）：
+ *   1) 旧画面被“抽走”：残影上收、略缩、压暗（≈130ms）
+ *   2) 短暂暗场：新内容延迟 ~120ms 才出现，底栏始终不动
+ *   3) 新画面“砸下”：主面板从略大偏上落到略小再回弹；两侧配件分别从左右滑入；卡片逐张错开弹出
+ * 小切换（Mod 管理里换选中项）只做轻淡入，避免频繁黑场。
+ */
+const reducedMotion = () => Boolean(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+const ENTER_DELAY = 120;
+
+function captureGhost(tr) {
+  if (!tr || tr.scope === 'detail' || reducedMotion()) return null;
+  const src = tr.scope === 'view' ? $('#view') : $('#view .edit-pane');
+  if (!src) return null;
+  const r = src.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  const clone = src.cloneNode(true);
+  clone.removeAttribute('id');
+  clone.classList.add('view');
+  clone.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
+  // 旧画面里还没播完的入场动画不能带进残影，否则残影会重播一遍
+  clone.querySelectorAll('.anim-in').forEach((n) => { n.className = n.className.replace(/\banim-in\b|\bfrom-[\w-]+/g, ''); n.style.animationDelay = ''; });
+  if (tr.scope === 'pane') clone.querySelector('.kind-tabs')?.style.setProperty('visibility', 'hidden');
+  Object.assign(clone.style, { width: '100%', height: '100%', margin: '0', overflow: 'hidden' });
+  const ghost = document.createElement('div');
+  ghost.className = 'wb-ghost';
+  Object.assign(ghost.style, { left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
+  ghost.appendChild(clone);
+  ghost._scroll = src.scrollTop;
+  return ghost;
+}
+
+/** 给元素挂一段入场动画，结束后清理（最小化时 animationend 可能不触发，用定时兜底） */
+function animateIn(el, kind, delay = 0) {
+  if (!el) return;
+  const cls = ['anim-in', 'from-' + kind];
+  el.style.animationDelay = delay + 'ms';
+  el.classList.add(...cls);
+  const done = () => { el.classList.remove(...cls); el.style.animationDelay = ''; };
+  el.addEventListener('animationend', done, { once: true });
+  setTimeout(done, delay + 700);
+}
+
+/** 卡片 / 向导格逐张错开弹出 */
+function staggerIn(list, base, step = 30, max = 14) {
+  list.forEach((el, i) => animateIn(el, 'pop', base + Math.min(i, max) * step));
+}
+
+/** 三栏布局：左栏从左、中间砸下、右栏从右 */
+function enterColumns(cols, base) {
+  if (!cols.length) return;
+  if (cols.length === 1) { animateIn(cols[0], 'slam', base); return; }
+  animateIn(cols[0], 'side-left', base + 50);
+  cols.slice(1, -1).forEach((c) => animateIn(c, 'slam', base));
+  animateIn(cols[cols.length - 1], cols.length === 2 ? 'slam' : 'side-right', base + (cols.length === 2 ? 0 : 60));
+}
+
+function enterPaneContent(base, dir) {
+  // 只在 #view 里找：残影里也有一份同名结构
+  const parts = $$('#view .edit-pane > :not(.kind-tabs):not(#session-hint):not(.dock-mini)');
+  for (const el of parts) {
+    if (el.classList.contains('skill-wrap') || el.classList.contains('module-wrap')) enterColumns([...el.children], base);
+    else if (el.classList.contains('sinner-split')) {
+      animateIn(el.querySelector('.sinner-rail'), 'side-left', base + 40);
+      staggerIn($$('.p-grid > .p-card', el), base + 60);
+    } else if (el.classList.contains('sinner-board')) staggerIn([...el.children], base, 28);
+    else if (el.classList.contains('wiz-grid')) staggerIn([...el.children], base, 30);
+    else animateIn(el, dir === 'back' ? 'slam-up' : 'slam', base);
+  }
+}
+
+function playEnter({ scope, dir }, ghost) {
+  if (reducedMotion()) return;
+  if (scope === 'detail') {
+    $$('#view .detail-pane > .detail-body, #view .detail-pane .detail-head .meta-row').forEach((el) => animateIn(el, 'fade'));
+    return;
+  }
+  if (ghost) {
+    document.body.appendChild(ghost);
+    ghost.firstElementChild.scrollTop = ghost._scroll || 0;
+    ghost.classList.add(dir === 'back' ? 'out-down' : 'out-up');
+    setTimeout(() => ghost.remove(), 220);
+  }
+  const base = ghost ? ENTER_DELAY : 0;
+  if (scope === 'pane') { enterPaneContent(base, dir); return; }
+  const root = $('#view')?.firstElementChild;
+  if (!root) return;
+  if (root.classList.contains('layout') && root.classList.contains('edit')) {
+    animateIn(root.querySelector('.list-panel'), 'side-left', base + 50);
+    const pane = root.querySelector('.edit-pane');
+    animateIn(pane, 'slam', base);
+    return;
+  }
+  if (root.classList.contains('layout')) { enterColumns([...root.children], base); return; }
+  if (root.classList.contains('home')) {
+    animateIn(root.querySelector('.home-cover'), 'slam', base);
+    animateIn(root.querySelector('.home-side'), 'side-right', base + 60);
+    return;
+  }
+  animateIn(root, 'slam', base);
 }
 
 function syncDockHeight() {
@@ -271,7 +430,7 @@ function updateDock() {
   set('#nc-name', S.home?.editorName || st.editorName || '但丁');
   set('#nc-mod', st.modCount ?? '—');
   set('#nc-dll', st.dllCount ?? '—');
-  set('#nc-editor', st.editorTitle || '边狱工作台 Limbus Workshop');
+  set('#nc-editor', String(st.editorTitle || '边狱工作台').split(' ')[0]); // 徽章框只放中文名，英文名是固定副标题
   set('#nc-size', fmtBytes(st.bytes));
   syncDockHeight();
 }
@@ -455,19 +614,39 @@ const WIZARDS = [
   { kind: 'enemy', name: '敌人编辑', sub: 'ENEMY', ico: '☠', wip: true },
 ];
 
+// 收起态的 Mod 列表：只留首字 + 启停点，悬停显示全名
+const modRowMini = (m) => `<button class="item mini ${S.selected === m.name ? 'active' : ''} ${m.enabled ? '' : 'disabled'}" data-act="select-mod" data-name="${esc(m.name)}" title="${esc(m.name)}${m.enabled ? '' : '（已禁用）'}">
+  <span class="mini-glyph">${esc(Array.from(m.name)[0] || '?')}</span>
+  <span class="state-dot ${m.enabled ? 'on' : 'off'}"></span>
+</button>`;
+
 function renderEdit() {
-  const rows = S.mods.map(modRow).join('');
-  return `<div class="layout edit">
-    <section class="panel">
-      <div class="panel-head">MOD 列表 <span class="count">${S.mods.length}</span></div>
-      <div class="panel-body list">${rows || '<div class="list-empty">mods 目录是空的</div>'}</div>
-      <div class="panel-foot"><button class="btn ghost block" data-act="create-mod">＋ 创建 Mod</button></div>
+  // 完整列表与收起窄条两层常驻，切换时只换类名：完整层向左滑出、窄条随后滑入（见 style.css v0.5「滑入滑出」）
+  return `<div class="layout edit ${S.listCollapsed ? 'list-collapsed' : ''}">
+    <section class="panel list-panel">
+      <div class="lp-full">
+        <div class="panel-head">MOD 列表 <span class="count">${S.mods.length}</span><button class="fold-btn" data-act="toggle-modlist" title="收起 Mod 列表">«</button></div>
+        <div class="panel-body list">${S.mods.map(modRow).join('') || '<div class="list-empty">mods 目录是空的</div>'}</div>
+        <div class="panel-foot"><button class="btn ghost block" data-act="create-mod">＋ 创建 Mod</button></div>
+      </div>
+      <div class="lp-mini">
+        <div class="panel-head"><button class="fold-btn" data-act="toggle-modlist" title="展开 Mod 列表">»</button></div>
+        <div class="panel-body list">${S.mods.map(modRowMini).join('')}</div>
+        <div class="panel-foot"><button class="btn ghost block" data-act="create-mod" title="创建 Mod">＋</button></div>
+      </div>
     </section>
     <section class="panel edit-pane">
-      ${S.editKind ? renderKindArea() : renderWizardHome()}
+      ${S.editKind ? renderKindTabs() + renderKindArea() : renderWizardHome()}
       <div class="dock-mini" id="session-hint"></div>
     </section>
   </div>`;
+}
+
+/** 编辑区顶部的子页签：进入任意编辑器后常驻，可直接跳到其他编辑器，不必逐层返回 */
+function renderKindTabs() {
+  return `<nav class="kind-tabs">${WIZARDS.map((w) => `<button class="kind-tab ${w.kind === S.editKind ? 'active' : ''} ${w.wip ? 'wip' : ''}" data-act="open-kind" data-kind="${w.kind}" title="${w.wip ? w.name + '（维修中）' : '切换到' + w.name}">
+      <span class="kt-ico">${w.ico}</span><span>${w.name.replace('编辑', '')}</span>
+    </button>`).join('')}</nav>`;
 }
 
 function renderWizardHome() {
@@ -500,32 +679,77 @@ function sinnerCharacters() {
   return (S.vanilla?.characters || []).filter((c) => Number(c.id) >= 1 && Number(c.id) <= 12);
 }
 
+// 罪人编号 1–12 → 原版切图（定义在 ui-assets.css 的 CSS 变量里：立绘卡、徽记）
+const sinnerNo = (id) => String(Math.max(1, Math.min(12, Number(id) || 1))).padStart(2, '0');
+const sinnerCard = (id) => `var(--ui-sinner-card-${sinnerNo(id)})`;
+const sinnerEmblem = (id) => `var(--ui-sinner-emblem-${sinnerNo(id)})`;
+
 function renderSinnerArea() {
-  const chars = sinnerCharacters();
   const list = S.mods.find((m) => m.name === S.selected);
-  const disabled = list && !list.enabled;
-  const all = S.vanilla?.custom || [];
-  const custom = S.sinner ? all.filter((p) => Number(p.characterId) === Number(S.sinner)) : all;
-  const faces = chars.map((c) => `<button class="sinner ${S.sinner === c.id ? 'active' : ''}" data-act="pick-sinner" data-id="${c.id}">
-      <span class="face">${esc(String(c.name || '?').slice(0, 1))}</span>
-      <span class="s-name">${esc(c.name)}</span>
+  const banner = list && !list.enabled ? '<div class="banner red">该 Mod 正在被禁用的状态 · 修改仍会保存到磁盘，但不会在游戏中生效</div>' : '';
+  return S.sinnerPicked ? renderSinnerPersonalities(banner) : renderSinnerPicker(banner);
+}
+
+/** 第一步：12 罪人立绘卡（6×2，仿原版编队） */
+function renderSinnerPicker(banner) {
+  const cards = sinnerCharacters().map((c) => `<button class="sinner-card ${Number(S.sinner) === Number(c.id) ? 'active' : ''}" data-act="pick-sinner" data-id="${c.id}" title="${esc(c.name)}">
+      <span class="sc-art" style="background-image:${sinnerCard(c.id)}"></span>
+      <span class="sc-emblem" style="background-image:${sinnerEmblem(c.id)}"></span>
+      <span class="sc-name">${esc(c.name)}</span>
     </button>`).join('');
-  const rows = custom.map((p) => `<button class="person-row" data-act="open-personality" data-id="${esc(p.id)}">
-      <strong>${esc(p.name || p.id)}</strong><small>${esc(p.title || '')}</small><span class="muted">${esc(p.id)}</span>
-    </button>`).join('');
-  const vanillaRows = (S.vanillaList || []).map((p) => `<div class="person-row vanilla"><strong>${esc(p.name || p.id)}</strong><small>${esc(p.title || '')}</small><span class="muted">${esc(p.id)}</span></div>`).join('');
   return `<div class="pane-head">
     <button class="btn ghost sm" data-act="back-wizard">← 返回</button>
-    <div><h2>人格编辑</h2><p class="muted">${esc(S.selected || '')} · 选择罪人后开始</p></div>
+    <div><h2>人格编辑</h2><p class="muted">${esc(S.selected || '')} · 选择要编辑的罪人</p></div>
   </div>
-  ${disabled ? '<div class="banner red">该 Mod 正在被禁用的状态 · 修改仍会保存到磁盘，但不会在游戏中生效</div>' : ''}
-  <div class="sinner-grid">${faces}</div>
-  <div class="list-section">
-    <button class="section-toggle" data-act="toggle-vanilla">原版人格列表 (${(S.vanillaList || []).length}) <span>${S.showVanilla ? '收起' : '展开'}</span></button>
-    ${S.showVanilla ? `<div class="person-list">${vanillaRows || '<div class="list-empty">该罪人没有原版人格</div>'}</div>` : ''}
-    <div class="list-sub">本 MOD 自定义人格${S.sinner ? ` · ${esc(chars.find((c) => c.id === S.sinner)?.name || '')}` : ''}</div>
-    <div class="person-list">${rows || `<div class="list-empty">${S.sinner ? '该罪人在此 Mod 下还没有自定义人格' : '这个 Mod 里还没有人格'}</div>`}</div>
-    <button class="btn ghost block" data-act="create-personality" ${S.sinner ? '' : 'disabled'}>＋ 新建人格</button>
+  ${banner}
+  <div class="sinner-board">${cards}</div>`;
+}
+
+/** 第二步：左侧罪人小头像 + 人格卡列表（原版折叠卡 → 自定义 → ＋新建） */
+function renderSinnerPersonalities(banner) {
+  const chars = sinnerCharacters();
+  const cur = chars.find((c) => Number(c.id) === Number(S.sinner));
+  const all = S.vanilla?.custom || [];
+  // 仿原版编队左栏：方形头像，左上角 = 本 Mod 该罪人的自定义人格数（原版此处是同步等级），右下角 = 罪人名（原版是 Lv）
+  const rail = chars.map((c) => {
+    const n = all.filter((p) => Number(p.characterId) === Number(c.id)).length;
+    return `<button class="sinner-face ${Number(S.sinner) === Number(c.id) ? 'active' : ''}" data-act="pick-sinner" data-id="${c.id}" title="${esc(c.name)} · 自定义人格 ${n} 个">
+      <span class="sf-art" style="background-image:${sinnerCard(c.id)}"></span>
+      ${n ? `<span class="sf-count">${n}</span>` : ''}
+      <span class="sf-name">${esc(c.name)}</span>
+    </button>`;
+  }).join('');
+  const custom = all.filter((p) => Number(p.characterId) === Number(S.sinner));
+  const vanilla = S.vanillaList || [];
+  const card = (p, { kind, act }) => {
+    const on = String(p.id) === String(S.personalityId || '');
+    const r = Math.max(1, Math.min(3, Number(p.rank) || 1));
+    return `<${act ? 'button' : 'div'} class="p-card ${kind}${on ? ' active' : ''}" ${act ? `data-act="${act}" data-id="${esc(p.id)}"` : ''} title="${esc((p.name || p.id) + (p.title ? ' · ' + p.title : '') + ' · 稀有度 ' + pRankLabel(p.rank))}">
+      <span class="pc-art" style="background-image:${sinnerCard(S.sinner)}"></span>
+      <span class="pc-slot"><span class="pc-rank rank-${r}" title="稀有度 ${esc(pRankLabel(p.rank))}"></span></span>
+      <span class="pc-plate"><strong>${esc(p.name || p.id)}</strong><small>${esc(p.title || '')}</small><em>${esc(p.id)}</em></span>
+      ${kind === 'vanilla' ? '<span class="pc-tag">原版</span>' : ''}
+    </${act ? 'button' : 'div'}>`;
+  };
+  const toggle = `<button class="p-card toggle ${S.showVanilla ? 'open' : ''}" data-act="toggle-vanilla">
+      <span class="pc-art" style="background-image:${sinnerCard(S.sinner)}"></span>
+      <span class="pc-toggle"><strong>原版人格列表</strong><small>${vanilla.length} 个 · 点击${S.showVanilla ? '收起' : '展开'}</small><span class="pc-arrow">${S.showVanilla ? '◂' : '▸'}</span></span>
+    </button>`;
+  const vanillaCards = S.showVanilla ? vanilla.map((p) => card(p, { kind: 'vanilla', act: 'open-vanilla-personality' })).join('') : '';
+  const customCards = custom.map((p) => card(p, { kind: 'custom', act: 'open-personality' })).join('');
+  const create = `<button class="p-card create" data-act="create-personality" title="新建人格"><span class="pc-plus"></span><span class="pc-create-label">新建人格</span></button>`;
+  return `<div class="pane-head">
+    <button class="btn ghost sm" data-act="sinner-home">← 罪人</button>
+    <span class="pane-emblem" style="background-image:${sinnerEmblem(S.sinner)}"></span>
+    <div><h2>${esc(cur?.name || '人格编辑')}</h2><p class="muted">${esc(S.selected || '')} · 本 Mod 自定义 ${custom.length} 个</p></div>
+  </div>
+  ${banner}
+  <div class="sinner-split">
+    <nav class="sinner-rail">
+      <button class="rail-all" data-act="sinner-home" title="回到 12 罪人总览">ALL</button>
+      <div class="rail-grid">${rail}</div>
+    </nav>
+    <div class="p-grid">${toggle}${vanillaCards}${customCards}${create}</div>
   </div>`;
 }
 
@@ -538,45 +762,564 @@ function fieldRow(label, path, value, opts = {}) {
   return `<label class="field"><span>${label}</span><input type="${type}"${step} data-field="${path}" value="${esc(value ?? '')}"></label>`;
 }
 
-function renderPersonalityDetail() {
-  const p = S.personality;
-  const e = p.entity || {};
-  const l = p.locale || {};
-  const lists = (v) => (Array.isArray(v) ? v.join(',') : (v ?? ''));
-  const sess = S.session || {};
-  const dirty = sess.dirty;
-  const modEnabled = S.mods.find((m) => m.name === S.selected)?.enabled !== false;
-  return `<div class="pane-head">
-    <button class="btn ghost sm" data-act="back-personalities">← 返回</button>
-    <div><h2>${esc(l.name || e.id)}</h2><p class="muted">${esc(p.id)} · ${esc(S.selected || '')}</p></div>
-    <span class="spacer"></span>
-    <button class="btn ghost sm" data-act="undo" ${sess.undo ? '' : 'disabled'}>撤销</button>
-    <button class="btn ghost sm" data-act="redo" ${sess.redo ? '' : 'disabled'}>重做</button>
-    <button class="btn primary sm" data-act="save-personality">保存</button>
-    <span class="session-state ${dirty ? 'dirty' : ''}" id="session-state">${dirty ? '有未保存改动' : '已保存'}</span>
-  </div>
-  ${modEnabled ? '' : '<div class="banner red">该 Mod 正在被禁用的状态 · 修改仍会保存到磁盘，但不会在游戏中生效</div>'}
-  <div class="form" id="personality-form">
-    <div class="grid-2">
-      ${fieldRow('名称', 'locale.name', l.name)}
-      ${fieldRow('称号', 'locale.title', l.title)}
-    </div>
-    ${fieldRow('简介', 'locale.desc', l.desc, { textarea: true })}
-    <div class="grid-3">
-      ${fieldRow('等级 RANK', 'entity.rank', e.rank, { type: 'number' })}
-      ${fieldRow('基础 HP', 'entity.hp.defaultStat', e.hp?.defaultStat, { type: 'number', step: '0.5' })}
-      ${fieldRow('每级成长', 'entity.hp.incrementByLevel', e.hp?.incrementByLevel, { type: 'number', step: '0.01' })}
-      ${fieldRow('防御修正', 'entity.defCorrection', e.defCorrection, { type: 'number' })}
-    </div>
-    <div class="grid-2">
-      ${fieldRow('最小速度', 'entity.minSpeedList', lists(e.minSpeedList))}
-      ${fieldRow('最大速度', 'entity.maxSpeedList', lists(e.maxSpeedList))}
-    </div>
-    ${fieldRow('外观 (appearance)', 'entity.appearance', e.appearance)}
-    <div class="hint muted">改动会在停止输入后自动写入磁盘，并记入本文件的撤销历史。保存后撤销历史清空。</div>
+/* ============================ 人格编辑（v0.8.0） ============================ */
+
+const ATK_LIST = ['SLASH', 'PENETRATE', 'HIT'];
+const ATK_ZH = { SLASH: '斩击', PENETRATE: '突刺', HIT: '打击' };
+
+async function loadPersonalityExtra() {
+  if (!S.selected || !S.personalityId) return;
+  try {
+    if (!S.pI18n) { const r = await api('/api/personality/i18n'); S.pI18n = r.tables; }
+  } catch { /* 未定位时忽略 */ }
+  try {
+    const r = await api(`/api/personality/stats?name=${encodeURIComponent(S.selected)}&id=${encodeURIComponent(S.personalityId)}`);
+    S.pStats = r.stats;
+  } catch { /* 忽略 */ }
+}
+
+function pTables() {
+  return S.pI18n || { sins: [], skillKeywords: [], rankLabel: { 1: '0', 2: '00', 3: '000' }, unitKeyword: {}, association: {} };
+}
+
+function pRankLabel(rank) {
+  const t = pTables();
+  return (t.rankLabel && t.rankLabel[String(rank)]) || String(rank ?? '');
+}
+
+function pRankBadge(rank) {
+  const r = Math.max(1, Math.min(3, Number(rank) || 1));
+  return `<span class="p-rank-img rank-${r}" title="稀有度 ${esc(pRankLabel(rank))}"></span>`;
+}
+
+function pSinnerLogo(characterId) {
+  const found = ((S.vanilla && S.vanilla.characters) || []).find((c) => Number(c.id) === Number(characterId));
+  const zh = found ? found.name : '';
+  const letter = zh ? zh.slice(0, 1) : String(characterId ?? '?');
+  return `<span class="ph-logo" title="罪人 ${esc(zh || characterId)}">${esc(letter)}</span>`;
+}
+
+/* 主属性（罪孽）：游戏罪孽表是「暴怒/色欲…」，人格主属性按属性名显示（暴怒→愤怒） */
+const SIN_ATTR_NAME = { CRIMSON: '愤怒', SCARLET: '色欲', AMBER: '怠惰', SHAMROCK: '暴食', AZURE: '忧郁', INDIGO: '傲慢', VIOLET: '嫉妒', WHITE: '疯狂', BLACK: '哀叹' };
+function pSinZh(id) {
+  const t = pTables();
+  const hit = (t.sins || []).find((s) => s.id === id);
+  return SIN_ATTR_NAME[id] || (hit && hit.zh) || String(id || '');
+}
+function pSinChip(e) {
+  const v = e && e.uniqueAttribute;
+  return `<span class="p-chip p-sin" title="主属性（罪孽）：${esc(v || '未设置')}">${esc(v ? pSinZh(v) : '—')}</span>`;
+}
+function pSinSelect(e) {
+  const t = pTables();
+  const cur = e.uniqueAttribute || '';
+  const list = (t.sins || []).map((s) => String(s.id));
+  if (cur && !list.includes(String(cur))) list.push(String(cur));
+  const opt = [''].concat(list).map((id) => `<option value="${esc(id)}" ${String(cur) === String(id) ? 'selected' : ''}>${id ? esc(pSinZh(id)) : '未设置'}</option>`).join('');
+  return `<select data-field="entity.uniqueAttribute">${opt}</select>`;
+}
+/* 词条短标签（文档 17 第 4 条）：去掉 <color>/<s> 之类富文本，长名截断 */
+function pShort(text, n = 12) {
+  const s = String(text || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+const DEF_RULE_TEXT = '修正值 >1.5 致命 · >1 脆弱 · =1 普通 · <1 耐性 · ≤0.5 抵抗';
+function pHpTitle(e) {
+  const d = Number(e.hp?.defaultStat ?? S.personality?.entity?.hp?.defaultStat);
+  const inc = Number(e.hp?.incrementByLevel ?? S.personality?.entity?.hp?.incrementByLevel) || 0;
+  if (!Number.isFinite(d)) return '先填基础血量';
+  const lv = [1, 10, 20, 30, 40, 50, 65].map((n) => `Lv${n}: ${Math.round(d + inc * (n - 1))}`).join('  ');
+  return '按等级换算血量（Lv1 到 Lv65）  ' + lv;
+}
+
+const P_THR_COLORS = ['#E8C15A', '#D05A4A', '#4FA3B8', '#8C6BD0', '#6BAF6B', '#C97AA6', '#B9A25C', '#7FA9D0', '#C77F4F'];
+
+function pHeadBar(st) {
+  const hp = Number(st.hp65) || 0;
+  const th = (st.thresholds || []).slice(0, 9);
+  const order = th.map((x, i) => ({ pct: Number(x.pct) || 0, i })).sort((a, b) => b.pct - a.pct);
+  const rankOf = (i) => order.findIndex((o) => o.i === i) + 1;
+  const marks = th.map((x, i) => { const rank = rankOf(i); return `<span class="pb-mark" style="left:${Math.max(0, Math.min(100, Number(x.pct)))}%;background:${P_THR_COLORS[(rank - 1) % P_THR_COLORS.length]}" title="第 ${rank} 档：${x.pct}% 血量（${x.hp} 点）"></span>`; }).join('');
+  return `<div class="p-bar-wrap">
+    <div class="p-bar" title="Lv.65 血量 ${hp}"><span class="pb-fill"></span>${marks}</div>
+    <span class="pb-total" title="Lv.65 血量上限">♥${hp}</span>
   </div>`;
 }
 
+function pResistChips(e) {
+  const rows = (e.resistInfo && e.resistInfo.atkResistList) || [];
+  return ATK_LIST.map((k) => {
+    const hit = rows.find((r) => r && r.type === k);
+    const v = hit ? Number(hit.value) : '';
+    const cls = v === '' ? '' : v >= 2 ? 'bad' : v > 0 && v < 1 ? 'good' : '';
+    return `<span class="p-res ${cls}">${ATK_ZH[k]} ${v === '' ? '—' : v}</span>`;
+  }).join('');
+}
+
+function pSection(title, body, extra = '') {
+  return `<section class="p-sec">
+    <div class="p-sec-head"><h3>${title}</h3>${extra}</div>
+    <div class="p-sec-body">${body}</div>
+  </section>`;
+}
+
+function pRow(label, inner, hint = '') {
+  return `<label class="p-row"><span class="p-label">${label}</span><span class="p-input">${inner}</span>${hint ? `<span class="p-hint">${hint}</span>` : ''}</label>`;
+}
+
+function pSearchBox(id, placeholder, value) {
+  return `<input class="p-search" id="${id}" placeholder="${esc(placeholder)}" value="${esc(value || '')}" autocomplete="off">`;
+}
+
+function pSkillRows(e) {
+  const rows = e.attributeList || [];
+  const min = Math.max(0, Number(S.pSkillSlots) || 0);
+  const items = [];
+  for (let i = 0; i < Math.max(min, rows.length); i += 1) {
+    const r = rows[i];
+    if (!r) {
+      items.push(`<div class="p-item p-slot-empty"><span class="muted">空位 ${i + 1}</span><span class="p-slot-note muted">搜索技能后点结果填入</span></div>`);
+      continue;
+    }
+    items.push(`<div class="p-item">
+      <span class="pi-id">${esc(r.skillId)}</span>
+      <label class="pi-inline">数量 <input class="pi-num" type="number" min="0" max="99" data-skill-num="${i}" value="${esc(r.number ?? 1)}"></label>
+      <button class="icon-btn" data-act="p-jump-skill" data-id="${esc(r.skillId)}" title="打开技能编辑">🖊</button>
+      <button class="icon-btn rm" data-act="p-skill-rm" data-idx="${i}" title="移除">✕</button>
+    </div>`);
+  }
+  return items.join('');
+}
+
+function pDefRows(e) {
+  const rows = e.defenseSkillIDList || [];
+  const min = Math.max(0, Number(S.pDefSlots) || 0);
+  const items = [];
+  for (let i = 0; i < Math.max(min, rows.length); i += 1) {
+    const id = rows[i];
+    if (!id) {
+      items.push(`<div class="p-item p-slot-empty"><span class="muted">空位 ${i + 1}</span><span class="p-slot-note muted">搜索守备技能后点结果填入</span></div>`);
+      continue;
+    }
+    items.push(`<div class="p-item">
+      <span class="pi-id">${esc(id)}</span>
+      <button class="icon-btn" data-act="p-jump-skill" data-id="${esc(id)}" title="打开技能编辑">🖊</button>
+      <button class="icon-btn rm" data-act="p-def-rm" data-idx="${i}" title="移除">✕</button>
+    </div>`);
+  }
+  return items.join('');
+}
+
+function pBreakRows(e) {
+  const list = (e.breakSection && e.breakSection.sectionList) || [];
+  const hp65 = (S.pStats && S.pStats.hp65) || 0;
+  if (!list.length) return '<div class="p-empty muted">没有混乱阈值（不会被混乱）</div>';
+  const order = list.map((v, i) => ({ pct: Number(v) || 0, i })).sort((a, b) => b.pct - a.pct);
+  const rankOf = (i) => order.findIndex((o) => o.i === i) + 1;
+  return list.map((v, i) => {
+    const rank = rankOf(i);
+    return `<div class="p-item">
+      <span class="thr-dot" style="background:${P_THR_COLORS[(rank - 1) % P_THR_COLORS.length]}"></span>
+      <span class="pi-tag">第 ${rank} 档</span>
+      <input class="pi-num wide" type="number" min="0" max="100" data-break="${i}" value="${esc(v)}"><span class="pi-unit">%</span>
+      <span class="muted pi-note">＝ ${Math.round(((Number(v) || 0) / 100) * hp65)} HP</span>
+      <button class="icon-btn rm" data-act="p-break-rm" data-idx="${i}" title="删除这一档">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function pBuffRows(e) {
+  const groups = e.initBuffList || [];
+  if (!groups.length) return '<div class="p-empty muted">没有初始 Buff</div>';
+  return groups.map((g, gi) => `<div class="p-buff-group">
+      <div class="p-buff-head">升阶 ${esc(g.level)}${Number(g.level) === 4 ? ' · 默认' : ''}</div>
+      ${(g.list || []).map((b, bi) => `<div class="p-item">
+        <span class="pi-id">${esc(b.buff)}</span>
+        <label class="pi-inline">强度 <input class="pi-num" type="number" min="0" max="999" data-buff-stack="${gi}:${bi}" value="${esc(b.stack ?? 0)}"></label>
+        <label class="pi-inline">层数 <input class="pi-num" type="number" min="0" max="999" data-buff-turn="${gi}:${bi}" value="${esc(b.turn ?? '')}" placeholder="—"></label>
+        <button class="icon-btn rm" data-act="p-buff-rm" data-idx="${gi}:${bi}" title="移除">✕</button>
+      </div>`).join('')}
+    </div>`).join('');
+}
+
+/* 词条三组（文档 17 第 7 条）：可下拉、已有内容进入选项、每组最多 10 行、只保存已注册值 */
+const P_TAG_FIELDS = { unit: 'unitKeywordList', assoc: 'associationList', kw: 'skillKeywordList' };
+const P_TAG_TITLES = { unit: '单位词条', assoc: '阵营词条', kw: '自身户口（技能关键词）' };
+
+function pTagChoices(kind) {
+  const t = pTables();
+  if (kind === 'kw') return (t.skillKeywords || []).map((k) => ({ id: String(k.id), zh: k.zh || k.id }));
+  const map = kind === 'unit' ? (t.unitKeyword || {}) : (t.association || {});
+  return Object.keys(map).map((id) => ({ id, zh: map[id] || id }));
+}
+
+function pTagChips(list, kind) {
+  const cur = (list || []).map((x) => String(x || '').trim()).filter(Boolean);
+  const choices = pTagChoices(kind);
+  const zh = new Map(choices.map((c) => [String(c.id), c.zh || c.id]));
+  return `<span class="p-chips">${cur.length
+    ? cur.map((v) => `<span class="p-chip p-tagchip" title="${esc(v)}">${esc(pShort(zh.get(v) || v))}<button class="chip-x" data-act="p-tag-rm2" data-kind="${kind}" data-id="${esc(v)}" title="移除">✕</button></span>`).join('')
+    : '<span class="muted">未设置</span>'}</span>`;
+}
+
+/* 自身户口：7 个基础属性关键词，点击亮/暗切换（用户指定恢复第一版交互） */
+function pKwChips(list) {
+  const cur = new Set((list || []).map((x) => String(x || '').trim()).filter(Boolean));
+  const choices = pTagChoices('kw');
+  return `<span class="p-chips p-kwchips">${choices.map((c) => `<button type="button" class="p-kwchip${cur.has(String(c.id)) ? ' on' : ''}" data-act="p-kw-toggle" data-id="${esc(c.id)}" title="${esc(c.id)}">${esc(pShort(c.zh || c.id, 10))}</button>`).join('')}</span>`;
+}
+
+/* 单位/阵营词条：输入 + 模糊搜索，选中即加（最多 10 条） */
+function pTagSearch(list, kind) {
+  const cur = (list || []).map((x) => String(x || '').trim()).filter(Boolean);
+  const choices = pTagChoices(kind);
+  const q = String((S.pTagQ && S.pTagQ[kind]) || '').trim().toLowerCase();
+  const used = new Set(cur);
+  const hits = choices
+    .filter((c) => !used.has(String(c.id)))
+    .filter((c) => !q || String(c.id).toLowerCase().includes(q) || String(c.zh || '').toLowerCase().includes(q))
+    .slice(0, 8);
+  return `${pTagChips(cur, kind)}
+    <input class="p-search p-tagq" id="p-tagq-${kind}" data-tagq="${kind}" placeholder="输入${kind === 'unit' ? '单位' : '阵营'}词条名称或 id 搜索" value="${esc((S.pTagQ && S.pTagQ[kind]) || '')}" autocomplete="off" ${cur.length >= 10 ? 'disabled' : ''}>
+    <span class="p-chips p-taghits">${hits.map((c) => `<button type="button" class="p-taghit" data-act="p-tag-add2" data-kind="${kind}" data-id="${esc(c.id)}">${esc(pShort(c.zh || c.id, 12))}</button>`).join('') || (q ? '<span class="muted">没有匹配</span>' : '')}</span>`;
+}
+
+/* 被动并入人格页（文档 17 第 6 条）：战斗被动 / 支援被动 · 同步等级 N，加入前用下拉切级别 */
+function pPassiveSection(st, resHtml) {
+  const groups = [
+    ...(((st.passives && st.passives.battle) || []).map((g) => ({ kind: 'battle', g }))),
+    ...(((st.passives && st.passives.supporter) || []).map((g) => ({ kind: 'supporter', g }))),
+  ];
+  const item = (id, kind, level) => `<span class="p-pid"><span>${esc(id)}</span>
+      <button class="icon-btn" data-act="p-jump-passive" data-id="${esc(id)}" title="打开被动编辑">🖊</button>
+      <button class="icon-btn rm" data-act="p-passive-rm" data-kind="${kind}" data-level="${esc(level)}" data-id="${esc(id)}" title="移除">✕</button>
+    </span>`;
+  const body = groups.length
+    ? `<div class="p-passive-groups">${groups.map(({ kind, g }) => `<div class="p-passive-group">
+        <b>${kind === 'battle' ? '战斗被动' : '支援被动'} · 同步等级 ${esc(g.level)}</b>
+        <div>${(g.ids || []).map((id) => item(id, kind, g.level)).join('') || '<span class="muted">（空）</span>'}</div>
+      </div>`).join('')}</div>`
+    : '<div class="p-empty muted">还没有挂接被动；用下面的搜索框添加</div>';
+  const kindSel = `<select id="p-passive-kind" title="被动类别"><option value="battle">战斗被动</option><option value="supporter">支援被动</option></select>`;
+  const lvlSel = '';
+  return pSection('被动', `${body}
+    <div class="p-search-row">${pSearchBox('p-passive-q', '输入被动 id 或名称搜索', S.pPassiveQ)}</div>
+    <div class="p-res-list" id="p-passive-res">${resHtml || ''}</div>
+    <div class="p-add-row">${kindSel}${lvlSel}<button class="btn ghost sm" data-act="p-passive-add">＋ 加入</button></div>
+    <div class="hint muted">被动默认写入同步等级 4（私服默认全员同步 4）。</div>`);
+}
+
+/* 查看源代码：整块替换式页面（文档 12 条第 4.3 项） */
+function pSourceDocText(res) {
+  return JSON.stringify({ entity: res.entity, locale: res.locale }, null, 2);
+}
+async function openPersonalitySource() {
+  if (!S.personality) return;
+  const res = await api('/api/personality/source?name=' + encodeURIComponent(S.selected) + '&id=' + encodeURIComponent(S.personality.id));
+  S.pSource = { id: S.personality.id, mode: 'view', text: pSourceDocText(res), locked: Boolean(res.locked), draft: '' };
+  render();
+}
+function renderPersonalitySourcePage() {
+  const sc = S.pSource;
+  const editing = sc.mode === 'edit' && !sc.locked;
+  const state = sc.locked ? '已锁定：源码被手动改过，表单编辑已停用' : editing ? '编辑中（未保存）' : '只读预览';
+  return `<div class="p-source-page">
+  <div class="ps-head">
+    <button class="btn ghost sm" data-act="p-source-back">← 返回人格编辑</button>
+    <span class="ps-title">源代码 <b>${esc(S.selected)}</b> · ${esc(sc.id)}</span>
+    <span class="ps-state ${sc.locked ? 'lock' : editing ? 'edit' : ''}">${state}</span>
+    <span class="ps-acts">${editing
+      ? '<button class="btn ghost sm" data-act="p-source-cancel">取消修改</button><button class="btn primary sm" data-act="p-source-save">保存源码</button>'
+      : (sc.locked ? '' : '<button class="btn primary sm" data-act="p-source-edit">手动修改</button>')}</span>
+  </div>
+  <div class="ps-body">
+    <textarea id="p-source-text" class="ps-text" spellcheck="false" wrap="off"${editing ? '' : ' readonly'}>${esc(sc.text)}</textarea>
+  </div>
+  <div class="ps-foot muted">保存会写回实体与本地化文件（字段校验仍生效）。保存后该人格标记为「源码已手改」，表单编辑将被锁定。</div>
+</div>`;
+}
+
+function renderPersonalityDetail() {
+  const p = S.personality;
+  if (!p) return '';
+  if (S.pSource && String(S.pSource.id) === String(p.id)) return renderPersonalitySourcePage();
+  const e = p.entity || {};
+  const l = p.locale || {};
+  const st = S.pStats || {};
+  const sess = S.session || {};
+  const dirty = Boolean(sess.dirty);
+  const modEnabled = S.mods.find((m) => m.name === S.selected)?.enabled !== false;
+  const name = l.name || String(p.id);
+  const vanilla = Boolean(p.vanilla);
+  const passiveCounts = (st.passives && st.passives.counts) || { battle: 0, supporter: 0 };
+  const skillCount = (e.attributeList || []).length;
+  const res = S.pSearch || {};
+  const results = (kind) => (res[kind] || []).slice(0, 20).map((r) => `<button class="p-res-item" data-act="p-pick-${kind}" data-id="${esc(r.id)}">
+      <span>${esc(r.name || r.id)}</span><small>${esc(r.id)} · ${esc(r.source)}</small></button>`).join('');
+  const rankList = (() => { const cur = Number(e.rank); const list = [1, 2, 3]; if (Number.isFinite(cur) && cur > 0 && !list.includes(cur)) list.push(cur); return list; })();
+  const rankPicker = `<span class="p-rank-pick">${[1, 2, 3].map((r) => `<button type="button" class="p-rank-opt rank-${r}${Number(e.rank) === r ? ' on' : ''}" data-act="p-rank-set" data-rank="${r}" title="稀有度 ${esc(pRankLabel(r))}"></button>`).join('')}</span>`;
+  const minSp = (e.minSpeedList || [])[0] ?? '';
+  const maxSp = (e.maxSpeedList || [])[0] ?? '';
+  const apps = (S.pAppOptions || []).filter((a) => !S.pAppQ || String(a).toLowerCase().includes(String(S.pAppQ).toLowerCase()));
+  const locked = Boolean(p.locked);
+  const hpTitle = pHpTitle(e);
+
+  return `<div class="p-edit" id="personality-form">
+    <aside class="p-portrait">
+      <div class="pp-frame"><div class="pp-art">${esc((name || '?').slice(0, 1))}</div></div>
+      <button class="btn ghost sm" data-act="p-portrait">编辑立绘</button>
+      <div class="pp-id">${esc(p.id)}${vanilla ? ' · 原版' : ''}</div>
+      <button class="btn ghost sm" data-act="p-back" title="返回人格列表">← 退出</button>
+    </aside>
+    <div class="p-main${locked ? ' p-locked' : ''}">
+      <header class="p-head">
+        <div class="ph-row ph-row1">
+          ${pSinnerLogo(e.characterId)}
+          <h2>${esc(name)}</h2>
+          <span class="spacer"></span>
+          <span class="session-state ${dirty ? 'dirty' : ''}" id="session-state">${dirty ? '有未保存改动' : '已保存'}</span>
+        </div>
+        <div class="ph-row ph-row2">
+          ${pRankBadge(e.rank)}
+          ${pSinChip(e)}
+          <span class="p-chip">防御修正值 ${esc(e.defCorrection ?? '—')}</span>
+          <span class="p-chip">速度区间 ${esc(minSp === '' ? '—' : minSp)} ~ ${esc(maxSp === '' ? '—' : maxSp)}</span>
+          ${pResistChips(e)}
+        </div>
+        <div class="ph-row ph-row3">
+          ${pHeadBar(st)}
+          <span class="ph-counts">技能 ${skillCount} · 被动 ${passiveCounts.battle + passiveCounts.supporter}</span>
+        </div>
+        <div class="ph-row ph-row4">
+          <button class="btn ghost sm" data-act="undo" ${!locked && sess.undo ? '' : 'disabled'}>撤销</button>
+          <button class="btn ghost sm" data-act="redo" ${!locked && sess.redo ? '' : 'disabled'}>重做</button>
+          <button class="btn primary sm" data-act="save-personality"${locked ? ' disabled' : ''}>保存</button>
+          <button class="btn ghost sm" data-act="p-source">查看源代码</button>
+          <span class="spacer"></span>
+          <button class="btn danger sm" data-act="p-del">删除人格</button>
+        </div>
+      </header>
+      ${modEnabled ? '' : '<div class="banner red">该 Mod 正在被禁用的状态 · 修改仍会保存到磁盘，但不会在游戏中生效</div>'}
+      ${locked ? '<div class="banner lock">🔒 该人格的源码已被手动修改并锁定：表单已锁定，只能通过「查看源代码」修改（删除人格可解除）。</div>' : ''}
+
+      ${pSection('基础数值', `
+        ${pRow('人格名称', `<input data-field="locale.name" value="${esc(l.name ?? '')}" placeholder="必填">`)}
+        ${pRow('稀有度', rankPicker + `<select class="sr-only" data-field="entity.rank" tabindex="-1" aria-hidden="true">${rankList.map((r) => `<option value="${r}" ${Number(e.rank) === r ? 'selected' : ''}>${r}</option>`).join('')}</select>`)}
+        <div class="p-grid2">
+          ${pRow('防御修正值', `<input type="number" data-field="entity.defCorrection" value="${esc(e.defCorrection ?? '')}" placeholder=">1.5 致命 · >1 脆弱 · =1 普通 · <1 耐性 · ≤0.5 抵抗">`)}
+          ${pRow('速度区间', `<span class="p-speed-pair"><input type="number" step="1" data-field="entity.speedMin" value="${esc(minSp)}" placeholder="最小"><span class="p-speed-tilde">~</span><input type="number" step="1" data-field="entity.speedMax" value="${esc(maxSp)}" placeholder="最大"></span>`)}
+        </div>
+        ${pRow('外观资源名', `<input id="p-app" data-field="entity.appearance" value="${esc(e.appearance ?? '')}" placeholder="例如 10101_YiSang_BaseAppearance" autocomplete="off"><span class="p-app-list" id="p-app-list">${apps.slice(0, 8).map((a) => `<button class="p-app-item" data-act="p-app-set" data-app="${esc(a)}">${esc(a)}</button>`).join('')}</span>`)}
+      `)}
+
+      ${pSection('血量与混乱阈值', `
+        <div class="p-grid2">
+          ${pRow('基础血量', `<input type="number" step="0.5" data-field="entity.hp.defaultStat" value="${esc(e.hp?.defaultStat ?? '')}" title="${esc(hpTitle)}">`)}
+          ${pRow('每级成长', `<input type="number" step="0.01" data-field="entity.hp.incrementByLevel" value="${esc(e.hp?.incrementByLevel ?? '')}" title="${esc(hpTitle)}">`, 'Lv.65 血量＝基础＋成长×64（悬浮看各等级）')}
+        </div>
+        <div class="p-sub-head">混乱阈值（从右往左计数，最多 9 档）</div>
+        ${pBreakRows(e)}
+        <button class="btn ghost sm" data-act="p-break-add" ${((e.breakSection && e.breakSection.sectionList) || []).length >= 9 ? 'disabled' : ''}>＋ 增加一档</button>
+      `)}
+
+      ${pSection('物理抗性', ATK_LIST.map((k) => {
+        const hit = ((e.resistInfo && e.resistInfo.atkResistList) || []).find((r) => r && r.type === k);
+        return pRow(ATK_ZH[k], `<input type="number" step="0.05" min="0" max="10" data-field="entity.resist.${k}" value="${esc(hit ? hit.value : '')}" placeholder="倍率">`);
+      }).join(''))}
+
+      ${pSection('技能', `<div class="p-search-row">${pSearchBox('p-skill-q', '输入技能 id 或名称搜索（原版 + 全部 Mod）', S.pSkillQ)}</div>
+        <div class="p-res-list" id="p-skill-res">${results('skill')}</div>
+        ${pSkillRows(e)}
+        <button class="btn ghost sm" data-act="p-slot-add" data-kind="skill">＋ 再加一条技能</button>
+        <div class="p-divider"><span>守备技能</span></div>
+        <div class="p-search-row">${pSearchBox('p-def-q', '输入守备技能 id 搜索', S.pDefQ)}</div>
+        <div class="p-res-list" id="p-def-res">${results('def')}</div>
+        ${pDefRows(e)}
+        <button class="btn ghost sm" data-act="p-slot-add" data-kind="def">＋ 再加一条守备技能</button>`)}
+
+      ${pPassiveSection(st, results('passive'))}
+
+      ${pSection('上场初始 Buff', `<div class="p-search-row">${pSearchBox('p-buff-q', '输入 buff id 搜索（原版 + 全部 Mod）', S.pBuffQ)}</div>
+        <div class="p-res-list" id="p-buff-res">${results('buff')}</div>
+        ${pBuffRows(e)}
+        <div class="p-hint muted">初始 Buff 统一写入「升阶 4」组；用上面的搜索框添加条目。</div>`)}
+
+      ${pSection('词条', `
+        ${pRow('单位词条', pTagSearch(e.unitKeywordList, 'unit'))}
+        ${pRow('阵营词条', pTagSearch(e.associationList, 'assoc'))}
+        ${pRow('自身户口（技能关键词）', pKwChips(e.skillKeywordList), '点击切换这 7 个基础关键词')}
+      `)}
+
+      
+    </div>
+  </div>`;
+}
+
+/* ---- 立绘 / 源代码 / 删除 三个弹窗 ---- */
+
+/* 立绘区骨架（文档 17 第 11 条）：左侧显示数据，右侧留空（候选本轮不接入） */
+function portraitBody() {
+  const f = S.pf || { kind: 'profile', dataUrl: '' };
+  const label = f.kind === 'profile' ? '一破（profile）' : '三破（cg）';
+  const p = S.personality || {};
+  const e = p.entity || {};
+  const pid = esc(String(p.id ?? ''));
+  const sinner = ((S.vanilla && S.vanilla.characters) || []).find((c) => Number(c.id) === Number(e.characterId));
+  const rows = [
+    ['人格 id', pid || '—'],
+    ['罪人', esc(sinner ? sinner.name : (e.characterId ?? '—'))],
+    ['外观资源名', esc(e.appearance || '—')],
+    ['一破文件', 'custom_sprites/profile_' + pid + '.png'],
+    ['三破文件', 'custom_sprites/cg_' + pid + '.png'],
+    ['当前选项卡', esc(label)],
+  ];
+  const apps = (S.pAppOptions || []).filter((a) => !S.pfAppQ || String(a).toLowerCase().includes(String(S.pfAppQ).toLowerCase())).slice(0, 8);
+  return `<div class="pf-split">
+    <div class="pf-left">
+      <div class="pf-col-title">立绘数据</div>
+      <div class="pf-data">${rows.map(([k, v]) => `<div class="pf-datarow"><span class="pf-datak">${esc(k)}</span><span class="pf-datav">${v}</span></div>`).join('')}</div>
+      <div class="pf-tabs">
+        <button class="pf-tab ${f.kind === 'profile' ? 'on' : ''}" data-act="p-portrait-kind" data-kind="profile">一破</button>
+        <button class="pf-tab ${f.kind === 'cg' ? 'on' : ''}" data-act="p-portrait-kind" data-kind="cg">三破</button>
+      </div>
+      <div class="pf-frame"><img id="pf-preview" class="pf-img" ${f.dataUrl ? `src="${f.dataUrl}"` : 'src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="' } alt="${esc(label)}"></div>
+      <div class="pf-hint muted">只接受 .png；保存后写入 <code>custom_sprites/${f.kind}_${pid}.png</code>（同名旧图会被替换）。</div>
+      <label class="btn ghost sm pf-pick">选择图片<input id="pf-file" type="file" accept="image/png" hidden></label>
+    </div>
+    <div class="pf-right">
+      <div class="pf-col-title">使用原版立绘</div>
+      <input class="p-search" id="pf-app-q" placeholder="输入外观名 / 人格名 / id 搜索原版立绘" value="${esc(S.pfAppQ || '')}" autocomplete="off">
+      <div class="pf-apphits">${apps.map((a) => `<button class="pf-apphit" data-act="p-app-use" data-app="${esc(a)}">${esc(a)}</button>`).join('') || '<div class="pf-empty muted">没有匹配</div>'}</div>
+      <div class="pf-hint muted">选中即把外观资源名写成该原版外观（不写 custom_sprites）。</div>
+    </div>
+  </div>`;
+}
+
+function renderPfApps() {
+  const host = document.querySelector('.pf-apphits');
+  if (!host) return;
+  const apps = (S.pAppOptions || []).filter((a) => !S.pfAppQ || String(a).toLowerCase().includes(String(S.pfAppQ).toLowerCase())).slice(0, 8);
+  host.innerHTML = apps.map((a) => `<button class="pf-apphit" data-act="p-app-use" data-app="${esc(a)}">${esc(a)}</button>`).join('') || '<div class="pf-empty muted">没有匹配</div>';
+}
+
+let pAppsPromise = null;
+async function ensureAppOptions() {
+  if (Array.isArray(S.pAppOptions) && S.pAppOptions.length) return S.pAppOptions;
+  if (!pAppsPromise) {
+    pAppsPromise = api('/api/personality/appearance-options')
+      .then((res) => { S.pAppOptions = (res && res.options) || []; return S.pAppOptions; })
+      .catch((e) => { pAppsPromise = null; throw e; });
+  }
+  return pAppsPromise;
+}
+
+async function openPortraitModal() {
+  if (!S.personality) return;
+  try { await ensureAppOptions(); } catch (e) { toast(e.message, 'error'); }
+  S.pf = { kind: 'profile', dataUrl: '' };
+  S.pfAppQ = '';
+  modal({
+    title: '编辑立绘',
+    body: `<div class="pf-host">${portraitBody()}</div>`,
+    footer: '<button class="btn ghost" data-act="close-modal">返回</button><button class="btn primary" data-act="p-portrait-save">确认写入</button>',
+  });
+}
+
+async function openSourceModal() {
+  if (!S.personality) return;
+  const res = await api(`/api/personality/source?name=${encodeURIComponent(S.selected)}&id=${encodeURIComponent(S.personality.id)}`);
+  const text = JSON.stringify({ entity: res.entity, locale: res.locale }, null, 2);
+  modal({
+    title: '查看源代码',
+    body: `<div class="src-host"><textarea id="p-source-text" class="src-text" readonly spellcheck="false">${esc(text)}</textarea>
+      <div class="hint muted">只读。点「手动修改」后可直接编辑 JSON，保存会写回实体与本地化文件（字段校验仍生效）。</div></div>`,
+    footer: '<button class="btn ghost" data-act="close-modal">关闭</button><button class="btn ghost" data-act="p-source-edit">手动修改</button><button class="btn primary" data-act="p-source-save">保存</button>',
+  });
+}
+
+/* --------------------------- 人格编辑：数据交互层 --------------------------- */
+
+async function pPatch(patch) {
+  if (!S.personality || !S.selected) return null;
+  const res = await api('/api/personality/patch', {
+    method: 'POST',
+    body: { name: S.selected, id: S.personalityId, ...patch },
+  });
+  S.session = res.session;
+  if (res.changed) {
+    if (patch.entity) S.personality.entity = { ...(S.personality.entity || {}), ...patch.entity };
+    if (patch.locale) S.personality.locale = { ...(S.personality.locale || {}), ...patch.locale };
+  }
+  return res;
+}
+
+function pEntity() { return (S.personality && S.personality.entity) || {}; }
+
+function pCollectDynamic() {
+  const e = pEntity();
+  const patch = {};
+  const skillNums = $$('[data-skill-num]');
+  if (skillNums.length) {
+    const list = (e.attributeList || []).map((r, i) => ({ ...r }));
+    skillNums.forEach((el) => { const i = Number(el.dataset.skillNum); if (list[i]) list[i].number = num(el.value); });
+    patch.attributeList = list;
+  }
+  const breaks = $$('[data-break]');
+  if (breaks.length) {
+    const list = breaks.map((el) => num(el.value)).filter((v) => v !== null && v !== undefined && !Number.isNaN(v));
+    patch.breakSection = { sectionList: list };
+  }
+  const stacks = $$('[data-buff-stack]');
+  const turns = $$('[data-buff-turn]');
+  if (stacks.length || turns.length) {
+    const groups = JSON.parse(JSON.stringify(e.initBuffList || []));
+    stacks.forEach((el) => { const [gi, bi] = el.dataset.buffStack.split(':').map(Number); if (groups[gi]?.list?.[bi]) groups[gi].list[bi].stack = num(el.value); });
+    turns.forEach((el) => { const [gi, bi] = el.dataset.buffTurn.split(':').map(Number); const v = String(el.value).trim(); if (groups[gi]?.list?.[bi]) { if (v === '') delete groups[gi].list[bi].turn; else groups[gi].list[bi].turn = num(v); } });
+    patch.initBuffList = groups;
+  }
+  return Object.keys(patch).length ? { entity: patch } : null;
+}
+
+let pDynTimer = null;
+function pScheduleDyn() {
+  clearTimeout(pDynTimer);
+  pDynTimer = setTimeout(async () => {
+    try {
+      const patch = pCollectDynamic();
+      if (!patch) return;
+      await pPatch(patch);
+      await loadPersonalityExtra();
+      render();
+    } catch (err) { toast(err.message, 'error'); }
+  }, 700);
+}
+
+/* 描述区自动保存（文档 17 第 9 条）：单独走 /api/personality/meta，不碰 locale */
+let pMetaTimer = null;
+const pSearchTimers = {};function pSearchUnits(kind, q) {
+  clearTimeout(pSearchTimers[kind]);
+  pSearchTimers[kind] = setTimeout(async () => {
+    if (!q) { S.pSearch = { ...(S.pSearch || {}), [kind]: [] }; pRefreshRes(kind); return; }
+    try {
+      const map = { skill: 'skill', def: 'skill', buff: 'buff', passive: 'passive' };
+      const res = await api(`/api/unit-search?kind=${map[kind]}&q=${encodeURIComponent(q)}&limit=8`);
+      S.pSearch = { ...(S.pSearch || {}), [kind]: res.results || res.rows || [] };
+      pRefreshRes(kind);
+    } catch (err) { toast(err.message, 'error'); }
+  }, 260);
+}
+
+function pResHtml(kind) {
+  const rows = (S.pSearch || {})[kind] || [];
+  if (!rows.length) return '';
+  return rows.map((r) => `<button class="p-res-item" data-act="p-pick-${kind}" data-id="${esc(r.id)}">
+      <span>${esc(r.name || r.id)}</span><small>${esc(r.id)} · ${esc(r.source)}</small></button>`).join('');
+}
+
+function pRefreshRes(kind) {
+  const box = document.getElementById(`p-${kind}-res`);
+  if (box) box.innerHTML = pResHtml(kind);
+}
 /* -------------------------------- 编辑写入 -------------------------------- */
 
 let patchTimer = null;
@@ -587,20 +1330,48 @@ function readFieldPatch() {
   if (!form) return null;
   const entity = {};
   const locale = {};
+  const resist = {};
+  const baseHp = { ...((S.personality && S.personality.entity && S.personality.entity.hp) || {}) };
+  let hasResist = false;
+  let speedMin; let speedMax;
+  let speedRaw;
   $$('[data-field]', form).forEach((el) => {
     const path = el.dataset.field;
     const raw = el.value;
-    const [group, key] = path.split('.');
-    if (group === 'locale') { locale[key] = raw; return; }
-    if (key === 'hp.defaultStat') { entity.hp = { ...(entity.hp || {}), defaultStat: num(raw) }; return; }
-    if (key === 'hp.incrementByLevel') { entity.hp = { ...(entity.hp || {}), incrementByLevel: num(raw) }; return; }
-    if (key === 'rank' || key === 'defCorrection') { entity[key] = num(raw); return; }
-    if (key === 'minSpeedList' || key === 'maxSpeedList') {
-      entity[key] = String(raw).split(/[,，\s]+/).filter(Boolean).map((x) => num(x));
-      return;
-    }
-    if (key === 'appearance') { entity[key] = raw.trim(); return; }
+    if (!path || path.startsWith('search.')) return;
+    if (path.startsWith('locale.')) { locale[path.slice(7)] = raw; return; }
+    const key = path.slice(7);
+    if (key === 'rank') { if (raw !== '') entity.rank = num(raw); }
+    else if (key === 'defCorrection') entity.defCorrection = num(raw);
+    else if (key === 'uniqueAttribute') { entity.uniqueAttribute = raw; }
+    else if (key === 'appearance') entity.appearance = raw.trim();
+    else if (key === 'hp.defaultStat') entity.hp = { ...baseHp, defaultStat: num(raw) };
+    else if (key === 'hp.incrementByLevel') entity.hp = { ...baseHp, incrementByLevel: num(raw) };
+    else if (key === 'speed') speedRaw = String(raw).trim();
+    else if (key === 'speedMin') speedMin = num(raw);
+    else if (key === 'speedMax') speedMax = num(raw);
+    else if (key.startsWith('resist.')) { resist[key.slice(7)] = num(raw); hasResist = true; }
   });
+  if (speedRaw !== undefined) {
+    // 速度只保留「区间」单输入：3~7 或单个数字
+    const m = speedRaw.match(/^(-?\d+(?:\.\d+)?)\s*[~～\-–]\s*(-?\d+(?:\.\d+)?)$/);
+    const lo = m ? num(m[1]) : num(speedRaw);
+    const hi = m ? num(m[2]) : lo;
+    if (lo !== null && lo !== undefined && !Number.isNaN(lo)) entity.minSpeedList = [lo, lo, lo, lo];
+    if (hi !== null && hi !== undefined && !Number.isNaN(hi)) entity.maxSpeedList = [hi, hi, hi, hi];
+  }
+  if (speedMin !== undefined && speedMin !== null) entity.minSpeedList = [speedMin, speedMin, speedMin, speedMin];
+  if (speedMax !== undefined && speedMax !== null) entity.maxSpeedList = [speedMax, speedMax, speedMax, speedMax];
+  if (hasResist) {
+    const old = ((S.personality && S.personality.entity && S.personality.entity.resistInfo && S.personality.entity.resistInfo.atkResistList) || []);
+    entity.resistInfo = {
+      atkResistList: ['SLASH', 'PENETRATE', 'HIT'].map((k) => {
+        const prev = old.find((r) => r && r.type === k);
+        const v = resist[k] !== undefined ? resist[k] : (prev ? prev.value : 1);
+        return { type: k, value: v };
+      }),
+    };
+  }
   return { entity, locale };
 }
 
@@ -689,15 +1460,36 @@ function openCreatePersonality() {
   modal({
     title: '新建人格',
     body: `<div class="hint muted">罪人：${esc(sinner?.name || '未选择')} · Mod：${esc(S.selected || '')}</div>
-      <label class="field"><span>名称</span><input id="np-name" placeholder="例如：测试人格"></label>
+      <label class="field"><span>人格名称（必填）</span><input id="np-name" placeholder="例如：测试人格"></label>
+       <label class="field"><span>称号</span><input id="np-title" placeholder="称号"></label>
+      <label class="field"><span>人格 id（必填，不得与任何单位重复）</span><input id="np-id" placeholder="例如：10199"><span class="p-hint" id="np-id-hint"></span></label>
       <div class="grid-2">
-        <label class="field"><span>称号</span><input id="np-title" placeholder="称号"></label>
-        <label class="field"><span>编号（可留空自动分配）</span><input id="np-id" placeholder="自动"></label>
       </div>
-      <label class="field"><span>简介</span><textarea id="np-desc" rows="3"></textarea></label>`,
+      <label class="field"><span>简介</span><textarea id="np-desc" rows="3"></textarea></label>
+      <div class="hint muted">如果这个 id 属于原版人格，请回上一页从「原版人格列表」里选该人格（那样会把原版数据完整复制过来，并覆盖原版 id）。</div>`,
     footer: `<button class="btn ghost" data-act="close-modal">取消</button><button class="btn primary" data-act="submit-create-personality">创建</button>`,
   });
   setTimeout(() => $('#np-name')?.focus(), 30);
+}
+
+async function checkPersonalityId(raw) {
+  const hint = $('#np-id-hint');
+  if (!hint) return;
+  const id = String(raw || '').trim();
+  if (!id) { hint.textContent = ''; hint.className = 'p-hint'; return; }
+  if (!/^\d{4,10}$/.test(id)) { hint.textContent = 'id 需要 4–10 位数字'; hint.className = 'p-hint bad'; return; }
+  try {
+    const res = await api(`/api/personality/id-taken?id=${encodeURIComponent(id)}`);
+    if (res.taken) {
+      hint.textContent = res.taken.source === 'vanilla'
+        ? `已被原版人格占用（${res.taken.name || ''}）：若要改原版，请回列表从「原版人格列表」里选它`
+        : `已被 ${res.taken.source} 的 ${res.taken.name || ''} 占用`;
+      hint.className = 'p-hint bad';
+    } else {
+      hint.textContent = '这个 id 可用';
+      hint.className = 'p-hint good';
+    }
+  } catch (err) { hint.textContent = err.message; hint.className = 'p-hint bad'; }
 }
 
 async function confirmSwap(label) {
@@ -727,6 +1519,80 @@ function openRecover(check) {
 /* ---------------------------------- 动作 ---------------------------------- */
 
 const actions = {
+  'p-back': async () => {
+    S.personality = null; S.personalityId = null; S.sessionKey = ''; S.pStats = null; S.pSearch = {};
+    await loadPersonalities(S.selected); render();
+  },
+  'p-source': async () => { try { await openPersonalitySource(); } catch (e) { toast(e.message, 'error'); } },
+  'p-source-back': () => { S.pSource = null; render(); },
+  'p-source-cancel': () => { S.pSource = null; render(); },
+  'p-source-edit': () => {
+    if (!S.pSource || S.pSource.locked) return;
+    S.pSource.mode = 'edit';
+    render();
+    const ta = $('#p-source-text');
+    if (ta) { ta.focus(); ta.setSelectionRange(0, 0); }
+    toast('已进入编辑：保存时会写回实体与本地化', 'warn');
+  },
+  'p-source-save': async () => {
+    const ta = $('#p-source-text');
+    if (!ta) return;
+    if (S.pSource) S.pSource.text = ta.value;
+    let doc; try { doc = JSON.parse(ta.value); } catch { toast('JSON 解析失败，请检查括号与引号', 'error'); return; }
+    try {
+      await api('/api/personality/source', { method: 'POST', body: { name: S.selected, id: S.personality.id, entity: doc.entity, locale: doc.locale } });
+      closeModal(); toast('已写回并保存', 'ok');
+      S.pSource = null;
+      await loadPersonality(S.selected, S.personality.id); render();
+    } catch (e) { toast(e.message, 'error'); }
+  },
+  'p-del': () => {
+    if (!S.personality) return;
+    modal({
+      title: '删除人格',
+      body: '<div class="danger-box"><b>这个操作不可撤销。</b><div class="muted">将删除人格 <code>' + esc(S.personality.id) + '</code> 的实体、全部本地化条目、被动挂接与已导入的立绘贴图。</div></div>',
+      footer: '<button class="btn ghost" data-act="close-modal">取消</button><button class="btn danger" data-act="p-del-ok">确认删除</button>',
+    });
+  },
+  'p-del-ok': async () => {
+    const id = S.personality && S.personality.id;
+    if (!id) return;
+    try {
+      await api('/api/personality/delete', { method: 'POST', body: { name: S.selected, id } });
+      closeModal(); S.personality = null; S.personalityId = null; S.sessionKey = '';
+      await loadPersonalities(S.selected); render(); toast('人格已删除', 'ok');
+    } catch (e) { toast(e.message, 'error'); }
+  },
+  'p-slot-add': (el) => {
+    if (el.dataset.kind === 'skill') S.pSkillSlots = Number(S.pSkillSlots) || 0;
+    else S.pDefSlots = Number(S.pDefSlots) || 0;
+    render();
+  },
+  'p-passive-add': async () => {
+    const pid = String(S.pPassiveQ || '').trim();
+    if (!pid) { toast('先在搜索框里填被动 id，或点结果里的一条', 'warn'); return; }
+    const kind = document.getElementById('p-passive-kind')?.value || 'battle';
+    const level = 4;
+    try {
+      await api('/api/personality/passive', { method: 'POST', body: { name: S.selected, id: S.personality.id, kind, op: 'add', passiveId: pid, level } });
+      await loadPersonality(S.selected, S.personality.id); render(); toast(`已加入（${kind === 'battle' ? '战斗被动' : '支援被动'} · 同步等级 ${level}）`, 'ok');
+    } catch (e) { toast(e.message, 'error'); }
+  },
+  'p-passive-rm': async (el) => {
+    try {
+      await api('/api/personality/passive', { method: 'POST', body: { name: S.selected, id: S.personality.id, kind: el.dataset.kind, op: 'rm', passiveId: el.dataset.id, level: Number(el.dataset.level) || 4 } });
+      await loadPersonality(S.selected, S.personality.id); render(); toast('已移除', 'ok');
+    } catch (e) { toast(e.message, 'error'); }
+  },
+  'p-edit-passives': () => actions['open-kind']({ dataset: { kind: 'passive' } }),
+  'p-pick-passive': (el) => { S.pPassiveQ = el.dataset.id; pSearchUnits('passive', el.dataset.id); toast('已选中 ' + el.dataset.id + '，点「＋ 加入」写入', 'ok'); },
+  'p-app-use': async (el) => {
+    await pPatch({ entity: { appearance: el.dataset.app } });
+    closeModal();
+    render();
+    toast('已改用原版立绘：' + el.dataset.app, 'ok');
+  },
+  'p-app-set': (el) => { pPatch({ entity: { appearance: el.dataset.app } }).then(() => render()).catch((e) => toast(e.message, 'error')); },
   'close-modal': () => closeModal(),
   'wip-guide': wip,
   'wip-cover': wip,
@@ -840,6 +1706,20 @@ const actions = {
     const kind = el.dataset.kind;
     const w = WIZARDS.find((x) => x.kind === kind);
     if (!w || w.wip) { wip(); return; }
+    const same = S.editKind === kind;
+    // 正在编辑模块画布时切到别的编辑器：先走原有的“未保存/必填未填”拦截，确认后再切
+    if (!same && S.moduleEditing && S.mb && !el._guarded) {
+      mbLeaveGuard(() => { S.moduleEditing = null; S.mb = null; S.mbDoc = null; el._guarded = true; actions['open-kind'](el); el._guarded = false; });
+      return;
+    }
+    if (!same) {
+      S.moduleEditing = null; S.mb = null; S.mbDoc = null;
+      // 从别的编辑器切过来时清掉上一个的选中态，避免旧详情残留在新面板里
+      S.personality = null; S.personalityId = null; S.sinnerPicked = false;
+      S.skill = null; S.skillId = null; S.descChecks = null; S.descCheck = null;
+      S.passive = null; S.passiveId = null; S.pDescCheck = null;
+      S.buff = null; S.buffId = null; S.bDescCheck = null;
+    }
     S.editKind = kind;
     (async () => {
       if (kind === 'module') {
@@ -862,6 +1742,7 @@ const actions = {
         render();
         return;
       }
+      S.sinnerPicked = false;
       if (S.status.letheRoot) {
         await loadPersonalities(S.selected);
         if (!S.sinner || Number(S.sinner) < 1 || Number(S.sinner) > 12) {
@@ -877,11 +1758,232 @@ const actions = {
   'back-personalities': () => { flushPatch().catch(() => {}); S.personality = null; S.personalityId = null; render(); },
   'pick-sinner': async (el) => {
     S.sinner = Number(el.dataset.id);
+    S.sinnerPicked = true;
     const res = await loadVanilla(S.sinner);
     S.vanillaList = res.personalities || [];
     render();
   },
+  'sinner-home': () => { S.sinnerPicked = false; render(); },
+  'toggle-modlist': () => {
+    S.listCollapsed = !S.listCollapsed;
+    // 两层都已渲染，只在现有节点上切类名，滑动动画才能完整播放（重绘会重建 DOM、打断过渡）
+    const live = $('.layout.edit');
+    if (live) live.classList.toggle('list-collapsed', S.listCollapsed);
+    else render();
+    const ui = { ...(S.status?.ui || {}), listCollapsed: S.listCollapsed };
+    if (S.status) S.status.ui = ui;
+    api('/api/config', { method: 'POST', body: { ui } }).catch(() => { /* 写不进配置时只在本次生效 */ });
+  },
   'toggle-vanilla': () => { S.showVanilla = !S.showVanilla; render(); },
+  'open-vanilla-personality': async (el) => {
+    const id = el.dataset.id;
+    await loadPersonality(S.selected, id);
+    render();
+    const st = S.personality?.vanilla;
+    if (st) {
+      modal({
+        title: '这是原版人格',
+        body: `<p>即将把原版人格 <strong>${esc(S.personality?.locale?.name || id)}</strong>（id ${esc(id)}）的全部信息复制进本 Mod，作为「已预设参数的自定义人格」，并<strong>用这个 id 覆盖原版</strong>。</p>
+          <div class="hint muted">复制后可以自由修改全部字段；游戏内该原版人格会被这个 Mod 覆盖。</div>`,
+        footer: `<button class="btn ghost" data-act="close-modal">取消</button><button class="btn primary" data-act="confirm-vanilla-personality" data-id="${esc(id)}">确认复制并编辑</button>`,
+      });
+    }
+  },
+  'confirm-vanilla-personality': async (el) => {
+    const res = await api('/api/personality/copy-vanilla', { method: 'POST', body: { name: S.selected, id: el.dataset.id } });
+    closeModal();
+    toast(`已从原版复制为自定义人格 ${res.personality?.id || el.dataset.id}`, 'ok');
+    await loadPersonalities(S.selected);
+    S.vanillaList = S.vanilla?.personalities || [];
+    await loadPersonality(S.selected, el.dataset.id);
+    render();
+  },
+  'p-name-edit': () => {
+    const view = $('#p-name-view');
+    if (!view) return;
+    const input = document.createElement('input');
+    input.id = 'p-name-input';
+    input.className = 'p-name-input';
+    input.value = view.textContent.trim();
+    view.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const commit = async () => {
+      if (done) return;
+      done = true;
+      const v = input.value.trim();
+      if (!v) { render(); return; }
+      try { await pPatch({ locale: { name: v } }); render(); } catch (err) { toast(err.message, 'error'); }
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') commit();
+      else if (e.key === 'Escape') { done = true; render(); }
+    });
+    input.addEventListener('blur', () => { commit(); });
+  },
+  'p-pick-skill': async (el) => {
+    const id = Number(el.dataset.id);
+    const list = (pEntity().attributeList || []).map((r) => ({ ...r }));
+    if (list.some((r) => Number(r.skillId) === id)) { toast('这个技能已经在列表里了', 'warn'); return; }
+    list.push({ skillId: id, number: 1 });
+    S.pSkillQ = ''; S.pSearch = { ...(S.pSearch || {}), skill: [] };
+    await pPatch({ entity: { attributeList: list } });
+    await loadPersonalityExtra();
+    render();
+  },
+  'p-skill-rm': async (el) => {
+    const list = (pEntity().attributeList || []).filter((_, i) => i !== Number(el.dataset.idx)).map((r) => ({ ...r }));
+    await pPatch({ entity: { attributeList: list } });
+    await loadPersonalityExtra();
+    render();
+  },
+  'p-pick-def': async (el) => {
+    const id = Number(el.dataset.id);
+    const list = (pEntity().defenseSkillIDList || []).map(Number);
+    if (list.includes(id)) { toast('这个守备技能已经在列表里了', 'warn'); return; }
+    list.push(id);
+    S.pDefQ = ''; S.pSearch = { ...(S.pSearch || {}), def: [] };
+    await pPatch({ entity: { defenseSkillIDList: list } });
+    await loadPersonalityExtra();
+    render();
+  },
+  'p-def-rm': async (el) => {
+    const list = (pEntity().defenseSkillIDList || []).filter((_, i) => i !== Number(el.dataset.idx));
+    await pPatch({ entity: { defenseSkillIDList: list } });
+    await loadPersonalityExtra();
+    render();
+  },
+  'p-break-add': async () => {
+    const list = ((pEntity().breakSection && pEntity().breakSection.sectionList) || []).slice();
+    if (list.length >= 9) { toast('混乱阈值最多 9 档', 'warn'); return; }
+    const last = list.length ? Number(list[list.length - 1]) : 50;
+    list.push(Math.max(1, Math.round(last / 2)));
+    await pPatch({ entity: { breakSection: { sectionList: list } } });
+    await loadPersonalityExtra();
+    render();
+  },
+  'p-break-rm': async (el) => {
+    const list = ((pEntity().breakSection && pEntity().breakSection.sectionList) || []).filter((_, i) => i !== Number(el.dataset.idx));
+    await pPatch({ entity: { breakSection: { sectionList: list } } });
+    await loadPersonalityExtra();
+    render();
+  },
+  'p-tag-add': async (el) => {
+    const kind = el.dataset.kind;
+    const key = kind === 'unit' ? 'unitKeywordList' : 'associationList';
+    const input = $('#p-tag-' + kind);
+    const v = input?.value?.trim();
+    if (!v) { toast('先输入词条', 'warn'); return; }
+    const list = (pEntity()[key] || []).slice();
+    if (!list.includes(v)) list.push(v);
+    await pPatch({ entity: { [key]: list } });
+    render();
+  },
+  'p-tag-rm': async (el) => {
+    const kind = el.dataset.kind;
+    const key = P_TAG_FIELDS[kind] || 'unitKeywordList';
+    const list = (pEntity()[key] || []).filter((_, i) => i !== Number(el.dataset.idx));
+    await pPatch({ entity: { [key]: list } });
+    render();
+  },
+  'p-kw-toggle': async (el) => {
+    const kw = el.dataset.kw;
+    const cur = new Set(pEntity().skillKeywordList || []);
+    if (cur.has(kw)) cur.delete(kw); else cur.add(kw);
+    await pPatch({ entity: { skillKeywordList: [...cur] } });
+    render();
+  },
+  'p-pick-buff': async (el) => {
+    const id = el.dataset.id;
+    const groups = JSON.parse(JSON.stringify(pEntity().initBuffList || []));
+    let g4 = groups.find((g) => Number(g.level) === 4);
+    if (!g4) { g4 = { level: 4, list: [] }; groups.push(g4); }
+    const last = g4;
+    if (!Array.isArray(last.list)) last.list = [];
+    last.list.push({ buff: id, stack: 1 });
+    await pPatch({ entity: { initBuffList: groups } });
+    render();
+  },
+  'p-buff-rm': async (el) => {
+    const [gi, bi] = String(el.dataset.idx).split(':').map(Number);
+    const groups = JSON.parse(JSON.stringify(pEntity().initBuffList || []));
+    if (groups[gi] && groups[gi].list) groups[gi].list.splice(bi, 1);
+    if (groups[gi] && (!groups[gi].list || !groups[gi].list.length)) groups.splice(gi, 1);
+    await pPatch({ entity: { initBuffList: groups } });
+    render();
+  },
+  'p-tag-add2': async (el) => {
+    const kind = el.dataset.kind;
+    const field = P_TAG_FIELDS[kind];
+    const list = (pEntity()[field] || []).map(String);
+    const id = String(el.dataset.id);
+    if (list.includes(id)) return;
+    if (list.length >= 10) { toast('最多 10 条', 'warn'); return; }
+    list.push(id);
+    await pPatch({ entity: { [field]: list } });
+    if (S.pTagQ) S.pTagQ[kind] = '';
+    render();
+  },
+  'p-tag-rm2': async (el) => {
+    const kind = el.dataset.kind;
+    const field = P_TAG_FIELDS[kind];
+    const list = (pEntity()[field] || []).map(String).filter((x) => x !== String(el.dataset.id));
+    await pPatch({ entity: { [field]: list } });
+    render();
+  },
+  'p-kw-toggle': async (el) => {
+    const cur = new Set((pEntity().skillKeywordList || []).map(String));
+    const id = String(el.dataset.id);
+    if (cur.has(id)) cur.delete(id); else cur.add(id);
+    await pPatch({ entity: { skillKeywordList: [...cur] } });
+    render();
+  },
+  'p-rank-set': async (el) => {
+    const rank = Number(el.dataset.rank) || 1;
+    await pPatch({ entity: { rank } });
+    render();
+  },
+  'p-portrait': async () => { try { await openPortraitModal(); } catch (e) { toast(e.message, 'error'); } },
+  'p-portrait-kind': (el) => {
+    if (!S.pf) return;
+    S.pf.kind = el.dataset.kind;
+    S.pf.dataUrl = '';
+    const host = $('.pf-host');
+    if (host) host.innerHTML = portraitBody();
+  },
+  'p-portrait-save': async () => {
+    if (!S.pf || !S.pf.dataUrl) { toast('先选择一张 .png 图片', 'warn'); return; }
+    try {
+      const res = await api('/api/personality/portrait', { method: 'POST', body: { name: S.selected, id: S.personality.id, kind: S.pf.kind, dataUrl: S.pf.dataUrl } });
+      closeModal();
+      toast('已写入 ' + (res.rel || ('custom_sprites/' + S.pf.kind + '_' + S.personality.id + '.png')), 'ok');
+    } catch (e) { toast(e.message, 'error'); }
+  },
+  'p-jump-skill': async (el) => {
+    const id = el.dataset.id;
+    try {
+      S.personality = null;
+      S.personalityId = null;
+      S.editKind = 'skill';
+      await ensureKeywords();
+      await loadSkillList(S.selected);
+      await openSkill(id);
+      render();
+    } catch (err) { toast('这个技能不在当前 Mod 里：' + id, 'warn'); }
+  },
+  'p-jump-passive': async (el) => {
+    const id = el.dataset.id;
+    try {
+      S.personality = null;
+      S.personalityId = null;
+      S.editKind = 'passive';
+      await ensureKeywords();
+      await loadPassiveList(S.selected);
+      await openPassive(id);
+      render();
+    } catch (err) { toast('这个被动不在当前 Mod 里：' + id, 'warn'); }
+  },
   'open-personality': async (el) => {
     await loadPersonality(S.selected, el.dataset.id);
     render();
@@ -900,15 +2002,24 @@ const actions = {
   },
   'submit-create-personality': async () => {
     const name = S.selected;
+    const id = $('#np-id')?.value?.trim() || '';
+    const displayName = $('#np-name')?.value?.trim() || '';
+    if (!name) { toast('请先选择 Mod', 'warn'); return; }
+    if (!displayName) { toast('请填写人格名称', 'warn'); return; }
+    if (!id) { toast('请填写人格 id', 'warn'); return; }
+    const taken = await api(`/api/personality/id-taken?id=${encodeURIComponent(id)}`).catch(() => null);
+    if (taken && taken.taken) {
+      toast(taken.taken.source === 'vanilla' ? '这个 id 属于原版人格：请回列表从「原版人格列表」里选它' : `id 已被 ${taken.taken.source} 占用`, 'warn');
+      return;
+    }
     const body = {
       name,
       characterId: S.sinner,
-      displayName: $('#np-name')?.value?.trim() || '新人格',
+      displayName,
       title: $('#np-title')?.value?.trim() || '',
       desc: $('#np-desc')?.value?.trim() || '',
-      id: $('#np-id')?.value?.trim() || undefined,
+      id,
     };
-    if (!name) { toast('请先选择 Mod', 'warn'); return; }
     const res = await api('/api/personality/create', { method: 'POST', body });
     closeModal();
     toast(`人格 ${res.personality.id} 已创建`, 'ok');
@@ -1063,9 +2174,36 @@ document.addEventListener('click', (e) => {
   }
 });
 
-document.addEventListener('input', (e) => {
+let imeComposing = false;
+document.addEventListener('compositionstart', () => { imeComposing = true; }, true);
+document.addEventListener('compositionend', (e) => {
+  imeComposing = false;
   const t = e.target;
-  if (t.closest('#personality-form')) { schedulePatch(); return; }
+  if (t && t.dispatchEvent) t.dispatchEvent(new Event('input', { bubbles: true }));
+}, true);
+document.addEventListener('input', (e) => {
+  if (imeComposing || e.isComposing) return;
+  const t = e.target;
+  /* 立绘弹窗在 #modal-root 里（不在 #personality-form 内），这两条必须放在最前面 */
+  if (t.id === 'pf-app-q') { S.pfAppQ = t.value; renderPfApps(); return; }
+  if (t.id === 'p-app') { S.pAppQ = t.value; const box = $('#p-app-list'); if (box) box.innerHTML = (S.pAppOptions || []).filter((a) => !t.value || String(a).toLowerCase().includes(t.value.toLowerCase())).slice(0, 8).map((a) => '<button class="p-app-item" data-act="p-app-set" data-app="' + esc(a) + '">' + esc(a) + '</button>').join(''); return; }
+  if (t.closest('#personality-form')) {
+    if (t.dataset && (t.dataset.skillNum !== undefined || t.dataset.break !== undefined || t.dataset.buffStack !== undefined || t.dataset.buffTurn !== undefined)) { pScheduleDyn(); return; }
+    if (t.id === 'p-skill-q') { S.pSkillQ = t.value; pSearchUnits('skill', t.value); return; }
+    if (t.id === 'p-def-q') { S.pDefQ = t.value; pSearchUnits('def', t.value); return; }
+    if (t.id === 'p-buff-q') { S.pBuffQ = t.value; pSearchUnits('buff', t.value); return; }
+    if (t.id === 'p-passive-q') { S.pPassiveQ = t.value; pSearchUnits('passive', t.value); return; }
+    if (t.dataset && t.dataset.tagq) {
+      S.pTagQ = { ...(S.pTagQ || {}), [t.dataset.tagq]: t.value };
+      render();
+      refocus('p-tagq-' + t.dataset.tagq, t.value.length);
+      return;
+    }
+    if (t.id === 'np-id') { checkPersonalityId(t.value).catch(() => {}); }
+    schedulePatch();
+    return;
+  }
+  if (t.id === 'np-id') { checkPersonalityId(t.value).catch(() => {}); return; }
   if (t.id === 'skill-desc') { scheduleDesc(); return; }
   if (t.classList && t.classList.contains('coin-desc')) { scheduleCoinDesc(Number(t.dataset.index) || 0); return; }
   if (t.id === 'skill-search') { S.skillSearch = t.value; render(); refocus('skill-search', t.value.length); return; }
@@ -1082,7 +2220,17 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('change', (e) => {
+  if (e.target && e.target.id === 'pf-file') {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (!/\.png$/i.test(f.name) && f.type !== 'image/png') { toast('只接受 .png 图片', 'error'); return; }
+    const rd = new FileReader();
+    rd.onload = () => { S.pf = { ...(S.pf || { kind: 'profile' }), dataUrl: String(rd.result) }; const img = document.getElementById('pf-preview'); if (img) img.src = String(rd.result); };
+    rd.readAsDataURL(f);
+    return;
+  }
   const t = e.target;
+  if (t.dataset && t.dataset.tagsel) { pApplyTag(t.dataset.tagsel).catch((err) => toast(err.message, 'error')); return; }
   if (t.dataset && t.dataset.info) { scheduleInfo(); return; }
   if (t.dataset && t.dataset.pinfo) { schedulePInfo(); return; }
   if (t.dataset && t.dataset.binfo) { scheduleBInfo(); return; }
@@ -2506,21 +3654,46 @@ function mbPaletteHtml() {
     if (match('ifnot') || match('如果否') || match('条件')) items.push('<button class="mb-item mi-cond" data-mb-drag="stmt" data-mb-kind="ifnot"><b>如果 … 则不</b><small>IFNOT(条件)：不成立时执行里面的块</small></button>');
     if (match('continueif') || match('继续') || match('条件')) items.push('<button class="mb-item mi-cond" data-mb-drag="stmt" data-mb-kind="continueif"><b>继续如果</b><small>CONTINUEIF(条件)：不成立时停止本条脚本后续指令</small></button>');
   } else if (cat === 'buff') {
-    const all = (S.keywords?.buffs || []).flatMap((b) => (Array.isArray(b.ids) ? b.ids : [b.id]).map((id) => ({ id: String(id || ''), zh: b.zh || '', native: b.native || '', source: b.source || 'vanilla', panic: !!b.panic, icon: b.icon || null })));
+    const all = (S.keywords?.buffs || []).flatMap((b) => (Array.isArray(b.ids) ? b.ids : [b.id]).map((id) => ({ id: String(id || ''), zh: b.zh || '', native: b.native || '', source: b.source || 'vanilla', mod: b.mod || '', panic: !!b.panic, icon: b.icon || null })));
+    const infoOf = new Map();
+    for (const b of S.keywords?.buffs || []) for (const id of (Array.isArray(b.ids) ? b.ids : [b.id])) if (id && !infoOf.has(String(id))) infoOf.set(String(id), b);
     const seen = new Set();
     const uniq = all.filter((b) => { if (!b.id || b.panic || seen.has(b.id)) return false; seen.add(b.id); return true; });
     const iconHtml = (b) => b.icon
       ? '<img class="mb-bicon" loading="lazy" alt="" src="/api/sprite?mod=' + encodeURIComponent(b.icon.mod) + '&file=' + encodeURIComponent(b.icon.file) + '&t=' + encodeURIComponent(window.__WB_TOKEN__ || '') + '">'
       : '<span class="mb-bicon ph">' + esc(String(b.zh || b.native || b.id || '?').slice(0, 1)) + '</span>';
-    const pick = (b) => '<button class="mb-item mi-buff" data-mb-drag="value" data-mb-kind="s" data-mb-val="' + esc(b.id) + '">' + iconHtml(b) + '<span class="mb-btxt"><b>' + esc(b.zh || b.native || b.id) + '</b><small>' + esc(b.id + (b.source === 'mod' ? ' · 本 Mod' : '')) + '</small></span></button>';
+    const pick = (b) => '<button class="mb-item mi-buff" data-mb-drag="value" data-mb-kind="s" data-mb-val="' + esc(b.id) + '" title="' + esc(b.id + ' · ' + buffOwnerTag(b.id, b.mod, b.source)) + '">' + iconHtml(b) + '<span class="mb-btxt"><b>' + esc(b.zh || b.native || b.id) + '</b><small>' + esc(b.id + ' · ' + buffOwnerTag(b.id, b.mod, b.source)) + '</small></span></button>';
     const vis = uniq.filter((b) => match(b.id) || match(b.zh) || match(b.native));
-    const mine = vis.filter((b) => b.source === 'mod');
-    const vanilla = vis.filter((b) => b.source !== 'mod');
+
     const fold = (label, list, open) => list.length
       ? '<details class="mb-fold"' + (open ? ' open' : '') + '><summary>' + label + '（' + list.length + '）</summary>' + list.map(pick).join('') + '</details>'
       : '';
-    items = [fold('本 MOD 的 Buff', mine, true), fold('原版 Buff', vanilla, false)];
-    if (!mine.length && !vanilla.length) items = ['<div class="mb-empty2">没有匹配的 Buff</div>'];
+    const modOrder = (S.mods || []).map((m) => m.name);
+    const cmpName = (a, b) => String(a.zh || a.native || a.id).localeCompare(String(b.zh || b.native || b.id), 'zh');
+    const modIdx = (name) => { const i = modOrder.indexOf(name); return i < 0 ? 9999 : i; };
+    const custom = [];
+    const seenCustom = new Set();
+    for (const grp of S.keywords?.modBuffs || []) {
+      for (const id of grp.ids || []) {
+        const key = String(id || '');
+        if (!key || seenCustom.has(key)) continue;
+        const info = infoOf.get(key) || {};
+        if (info.panic && !S.mb.showPanic) continue;
+        if (!(match(key) || match(info.zh) || match(info.native))) continue;
+        seenCustom.add(key);
+        custom.push({ id: key, zh: info.zh || '', native: info.native || '', mod: grp.mod, icon: info.icon || null, panic: !!info.panic });
+      }
+    }
+    custom.sort((a, b) => {
+      const sa = a.mod === S.selected ? 0 : 1; const sb = b.mod === S.selected ? 0 : 1;
+      if (sa !== sb) return sa - sb;
+      const byMod = modIdx(a.mod) - modIdx(b.mod);
+      return byMod || cmpName(a, b);
+    });
+    const customIds = new Set(custom.map((b) => b.id));
+    const vanilla = vis.filter((b) => !customIds.has(b.id) && b.source !== 'mod' && !(S.keywords?.buffOwners || []).some((o) => o.id === b.id));
+    items = [fold('自定义Buff', custom.map((b) => ({ ...b, source: 'mod' })), true), fold('原版 Buff', vanilla, false)];
+    if (!custom.length && !vanilla.length) items = ['<div class="mb-empty2">没有匹配的 Buff</div>'];
   } else {
     items = mbRows('acquirer').filter((r) => r.name !== 'math' && scopeAllowsCommand(r.name) && (match(r.name) || match(r.summary) || (r.aliasOf || []).some((a) => match(a))))
       .map((r) => '<button class="mb-item mi-acq" data-mb-drag="value" data-mb-kind="acq" data-mb-val="' + esc(r.name) + '"><b>' + esc(r.name) + '()</b><small>' + esc((r.summary || '（英文原文档未收录说明）') + ((r.aliasOf && r.aliasOf.length) ? '（旧称：' + r.aliasOf.join(' / ') + '）' : '')) + '</small></button>');
@@ -2645,6 +3818,48 @@ function mbRedo() {
 }
 function mbLoopRowCount() {
   return ((S.mb && S.mb.program && S.mb.program.blocks) || []).filter((b) => b && b.k === 'timing' && b.loop && b.loop.n).length;
+}
+
+/* 底部状态检查（文档 17 第 12 条）：孤儿块 / 空壳 / 多循环 / 多时点 / 必填未填。只读，不改 S.mb。 */
+function mbStatusInfo() {
+  const blocks = (((S.mb && S.mb.program && S.mb.program.blocks) || [])).filter(Boolean);
+  const bad = [];
+  const stray = blocks.filter((b) => b.k !== 'timing');
+  if (stray.length) bad.push(`${stray.length} 个块在时点外（不会写进脚本）`);
+  const emptyTiming = blocks.filter((b) => b.k === 'timing' && !((b.body || []).length));
+  if (emptyTiming.length) bad.push(`${emptyTiming.length} 个时点没有内容`);
+  const loopNoN = blocks.filter((b) => b.k === 'timing' && b.loop && (b.loop.t === 'target' || b.loop.v) && !b.loop.n);
+  if (loopNoN.length) bad.push(`${loopNoN.length} 行设了遍历但没填次数`);
+  const loopRows = mbLoopRowCount();
+  if (loopRows > 1) bad.push(`${loopRows} 行设了遍历（LOOP 模块级，只有最后一段生效）`);
+  const hatKey = (b) => String(b.v) + '(' + [b.face, b.crit, b.kw, b.key]
+    .map((x) => (x === undefined || x === null ? '' : String(x))).join(',') + ')';
+  const seen = new Map();
+  blocks.filter((b) => b.k === 'timing').forEach((b) => { const k = hatKey(b); seen.set(k, (seen.get(k) || 0) + 1); });
+  const dups = [...seen.entries()].filter(([, n]) => n > 1);
+  if (dups.length) bad.push(`${dups.reduce((a, [, n]) => a + n, 0)} 行落在 ${dups.length} 个重复时点`);
+  let missing = 0;
+  try { missing = (mbMissingInfo().list || []).length; } catch { missing = 0; }
+  if (missing) bad.push(`${missing} 处必填未填`);
+  return { bad, missing, loopRows, dups };
+}
+
+function mbStatusHtml() {
+  const info = mbStatusInfo();
+  if (!info.bad.length) {
+    return '<div class="mb-status" id="mb-status"><span class="mb-dot ok"></span><span>状态检查：未发现结构问题</span></div>';
+  }
+  return '<div class="mb-status warn" id="mb-status"><span class="mb-dot bad"></span><span>状态检查：' + esc(info.bad.join(' · ')) + '</span></div>';
+}
+
+/** 只改参数（不整页重绘）的路径要单独刷新状态行 */
+function refreshMbStatus() {
+  const box = document.getElementById('mb-status');
+  if (!box) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = mbStatusHtml();
+  const next = tmp.firstElementChild;
+  if (next) box.replaceWith(next);
 }
 
 function mbCompileRows() {
@@ -2839,7 +4054,7 @@ function renderModuleEditorInner(back) {
     + '<div class="mb-body"><aside class="mb-pal">' + mbPaletteHtml() + '</aside>'
     + '<section class="mb-stage"><div class="mb-stage-head"><span>积木画布</span><span class="muted">从上到下拼接；带括号的块可以往括号里拖数值块</span></div>'
     + '<div class="mb-canvas" id="mb-canvas"><div class="mb-stack" data-stack="root">' + mbStackHtml('root') + '</div>'
-    + (S.mb.program.blocks.length ? '' : '<div class="mb-empty">拖一个「时点」积木进来开始</div>') + '</div>' + '<div class="mb-trash" id="mb-trash" title="拖到这里删除"><span>🗑</span><small>拖此删除</small></div>' + script + '</section></div>' + datalists;
+    + (S.mb.program.blocks.length ? '' : '<div class="mb-empty">拖一个「时点」积木进来开始</div>') + '</div>' + '<div class="mb-trash" id="mb-trash" title="拖到这里删除"><span>🗑</span><small>拖此删除</small></div>' + script + '</section></div>' + mbStatusHtml() + datalists;
 }
 /* ---------------- 程序变更 ---------------- */
 
@@ -3331,6 +4546,25 @@ function mbCanvasClick(e) {
   return true;
 }
 
+/* ---------- Buff 归属标签（v0.8.4：Buff 属于哪个 Mod） ---------- */
+/** 单个 Buff 的归属：本 Mod / 原版 / 具体 Mod 名；同 id 还被别的 Mod 定义时追加「另见 …」。 */
+function buffOwnerTag(id, mod, source) {
+  const key = String(id || '');
+  const sel = String(S.selected || '');
+  const ownMod = String(mod || '');
+  const own = ownMod ? (ownMod === sel ? '本 Mod' : ownMod) : (source === 'mod' ? '其他 Mod' : '原版');
+  const rec = (S.keywords?.buffOwners || []).find((o) => String(o.id) === key);
+  const extra = ((rec && rec.mods) || []).filter((m) => String(m) !== ownMod && String(m) !== sel);
+  return own + (extra.length ? '／另见 ' + extra.join('、') : '');
+}
+
+/** Buff 列表排序权重：本 Mod → 原版 → 其他 Mod。 */
+function buffOwnerRank(mod, source) {
+  const ownMod = String(mod || '');
+  if (ownMod && ownMod === String(S.selected || '')) return 0;
+  return source === 'vanilla' ? 1 : 2;
+}
+
 /* ---------- 槽位下拉选择器（v0.5.3 实参类型化） ---------- */
 function mbBuffChoices() {
   const list = S.keywords?.buffs || [];
@@ -3338,9 +4572,9 @@ function mbBuffChoices() {
   for (const b of list) {
     const ids = Array.isArray(b.ids) ? b.ids : [b.id || b.n];
     const zh = String(b.zh || b.native || b.name || '');
-    for (const id of ids.slice(0, 3)) if (id) out.push({ id: String(id), zh });
+    for (const id of ids.slice(0, 3)) if (id) out.push({ id: String(id), zh, mod: b.mod || '', source: b.source || 'vanilla' });
   }
-  return out;
+  return out.sort((a, b) => buffOwnerRank(a.mod, a.source) - buffOwnerRank(b.mod, b.source));
 }
 
 function mbPickButton(chain, kind, val, label, sub) {
@@ -3375,7 +4609,7 @@ function openSlotPicker(chain, type) {
   }
   if (st === 'buff') {
     const list = mbBuffChoices();
-    const opts = list.slice(0, 3000).map((b) => '<option value="' + esc(b.id) + '">' + esc((b.zh ? b.zh + ' · ' : '') + b.id) + '</option>').join('');
+    const opts = list.slice(0, 3000).map((b) => '<option value="' + esc(b.id) + '">' + esc((b.zh ? b.zh + ' · ' : '') + b.id + ' · ' + buffOwnerTag(b.id, b.mod, b.source)) + '</option>').join('');
     body += '<div class="field"><span>Buff 关键词（英文 id）</span><div class="row-inline"><select id="mb-pick-buff">' + opts + '</select>'
       + '<button class="btn primary sm" data-act="mb-pick-buff" data-chain="' + esc(chain) + '">填入</button></div></div>';
   }
@@ -3449,9 +4683,9 @@ function mbTargetModalBody(cur) {
   const buffNames = [];
   for (const b of (S.keywords?.buffs || [])) {
     const zh = String(b.zh || b.native || b.name || '');
-    for (const id of (Array.isArray(b.ids) ? b.ids : [b.id])) { if (!id || seenBuff.has(id)) continue; seenBuff.add(id); buffNames.push({ id: String(id), zh }); }
+    for (const id of (Array.isArray(b.ids) ? b.ids : [b.id])) { if (!id || seenBuff.has(id)) continue; seenBuff.add(id); buffNames.push({ id: String(id), zh, mod: b.mod || '', source: b.source || 'vanilla' }); }
   }
-  const buffOpts = buffNames.slice(0, 5000).map((b) => '<option value="' + esc(b.id) + '" label="' + esc((b.zh ? b.zh + ' · ' : '') + b.id) + '">' + esc((b.zh ? b.zh + ' · ' : '') + b.id) + '</option>').join('');
+  const buffOpts = buffNames.slice(0, 5000).map((b) => '<option value="' + esc(b.id) + '" label="' + esc((b.zh ? b.zh + ' · ' : '') + b.id + ' · ' + buffOwnerTag(b.id, b.mod, b.source)) + '">' + esc((b.zh ? b.zh + ' · ' : '') + b.id + ' · ' + buffOwnerTag(b.id, b.mod, b.source)) + '</option>').join('');
   return '<div class="mb-t-form">'
     + '<label class="field"><span>基础选择器</span><select id="mb-t-base"><option value="">（自定义表达式）</option>' + baseOpts + '</select></label>'
     + '<div class="grid-2"><label class="field"><span>单位 ID（id####，留空不用）</span><input id="mb-t-id" value="' + esc(idHit ? idHit[1] : '') + '" placeholder="例如 10101"></label>'
@@ -3786,6 +5020,7 @@ document.addEventListener('change', (e) => {
 function refreshMbScript() {
   const el = document.getElementById('mb-script');
   if (el) el.textContent = mbCompileScript();
+  refreshMbStatus();
 }
 
 function renderPassiveArea(back) {
@@ -3816,9 +5051,6 @@ function renderPassiveMain() {
   const p = S.passive;
   const info = p.info || {};
   const sess = S.session || {};
-  const sins = S.keywords?.sin || [];
-  const cts = S.keywords?.passiveConditions || [{ id: 'have', zh: '拥有' }, { id: 'resonance', zh: '共鸣' }];
-  const opt = (arr, v) => arr.map((x) => '<option value="' + esc(x.id) + '"' + (String(x.id) === String(v) ? ' selected' : '') + '>' + esc(x.zh || x.id) + '</option>').join('');
   return '<section class="panel skill-main"><div class="panel-head skill-head">'
     + '<div class="skill-title"><strong>' + esc(p.name || p.id) + '</strong><small>' + esc(p.id) + (p.override ? ' · 原版覆盖' : '') + '</small></div>'
     + '<span class="spacer"></span>'
@@ -3827,13 +5059,7 @@ function renderPassiveMain() {
     + '<button class="btn primary sm" data-act="save-passive">保存</button>'
     + '<span class="session-state ' + (sess.dirty ? 'dirty' : '') + '" id="session-state">' + (sess.dirty ? '有未保存改动' : '已保存') + '</span></div>'
     + '<div class="skill-body"><div class="info-card"><div class="col-title">被动基础信息</div>'
-    + '<label class="field check"><input type="checkbox" data-pinfo="needCondition"' + (info.needCondition ? ' checked' : '') + '><span>需要罪孽条件启动</span></label>'
-    + (info.needCondition
-      ? '<div class="grid-2"><label class="field"><span>数量</span><input type="number" data-pinfo="count" value="' + esc(info.count ?? 3) + '"></label>'
-        + '<label class="field"><span>罪孽</span><select data-pinfo="sin">' + opt(sins, info.sin) + '</select></label>'
-        + '<label class="field"><span>条件类型</span><select data-pinfo="conditionType">' + opt(cts, info.conditionType) + '</select></label></div>'
-      : '')
-    + '<div class="hint muted">' + (info.needCondition ? (Number(info.count) || 3) + ' 个 ' + esc(info.sin || '罪孽') + ' 罪孽' + (info.conditionType === 'resonance' ? '共鸣' : '拥有') : '不需要罪孽条件，被动常驻生效') + '</div>'
+    + '<div class="hint muted">「罪孽条件」已从人格页与被动页移除（文档 17 第 5 条）：被动是否带条件由被动脚本自身决定。</div>'
     + '</div><div class="editor-card"><div class="tabs">'
     + '<button class="tab ' + (S.passiveTab === 'code' ? 'active' : '') + '" data-act="passive-tab" data-tab="code">代码</button>'
     + '<button class="tab ' + (S.passiveTab === 'desc' ? 'active' : '') + '" data-act="passive-tab" data-tab="desc">描述</button></div>'
@@ -3846,9 +5072,9 @@ function renderPassiveMain() {
 function renderBuffArea(back) {
   const q = (S.buffSearch || '').trim().toLowerCase();
   const rows = (S.buffs || []).filter((b) => !q || String(b.id).toLowerCase().includes(q) || String(b.name || '').toLowerCase().includes(q))
-    .map((b) => '<button class="item ' + (S.buffId === String(b.id) ? 'active' : '') + '" data-act="open-buff" data-id="' + esc(b.id) + '">'
+    .map((b) => '<button class="item ' + (S.buffId === String(b.id) ? 'active' : '') + '" data-act="open-buff" data-id="' + esc(b.id) + '" title="' + esc(String(b.id) + ' · ' + buffOwnerTag(b.id, S.selected, 'mod')) + '">'
       + '<div class="item-main"><strong>' + esc(b.name || b.id) + '</strong><small>' + esc(b.id)
-      + (b.override ? ' · 原版覆盖' : '') + (b.maxStack ? ' · ' + b.maxStack + ' 层' : '') + '</small></div>'
+      + (b.override ? ' · 原版覆盖' : '') + (b.maxStack ? ' · ' + b.maxStack + ' 层' : '') + ' · ' + esc(buffOwnerTag(b.id, S.selected, 'mod')) + '</small></div>'
       + '<span class="state-dot ' + (b.updatedAt ? 'on' : '') + '"></span></button>').join('');
   const disabled = S.mods.find((m) => m.name === S.selected)?.enabled === false;
   return '<div class="pane-head">' + back + '<div><h2>Buff 编辑</h2><p class="muted">' + esc(S.selected || '') + '</p></div></div>'

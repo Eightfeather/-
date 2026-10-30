@@ -110,17 +110,11 @@ export const BUFF_TYPES = [
 ];
 
 function designRoot(letheRoot) {
-  const base = process.env.LOCALAPPDATA || process.env.HOME || '.';
-  const h = createHash('sha1').update(String(letheRoot || '').toLowerCase()).digest('hex').slice(0, 12);
-  return join(base, 'LetheWorkbench', 'projects', h);
+  // 设计态数据统一放在 <Lethe>/LCW/projects（迁移由 lcw.mjs 的 migrateToLcw 负责）
+  return join(letheRoot, 'LCW', 'projects');
 }
 export function metaRoot(letheRoot) {
-  const next = designRoot(letheRoot);
-  const legacy = join(workbenchDir(letheRoot), 'meta');
-  try {
-    if (!existsSync(next) && existsSync(legacy)) cpSync(legacy, next, { recursive: true });
-  } catch {}
-  return next;
+  return designRoot(letheRoot);
 }
 export function modulesDir(letheRoot) { return join(metaRoot(letheRoot), 'modules'); }
 export function skillsMetaDir(letheRoot, mod) { return join(metaRoot(letheRoot), 'skills', cleanName(mod, 'Mod 名称')); }

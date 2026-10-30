@@ -104,6 +104,16 @@ export function keywordTables(letheRoot) {
   const buffNative = new Map();    // id -> 原文名（可能是韩文/英文，给没有中文名的 buff 兜底显示）
   const buffSource = new Map();
   const buffMod = new Map();
+  const modBuffIds = new Map(); // Mod 名 -> Set(id)
+  const buffOwners = new Map(); // id -> Set(Mod 名)
+  const own = (modName, id) => {
+    const key = String(id || '').trim();
+    if (!modName || !key) return;
+    if (!modBuffIds.has(modName)) modBuffIds.set(modName, new Set());
+    modBuffIds.get(modName).add(key);
+    if (!buffOwners.has(key)) buffOwners.set(key, new Set());
+    buffOwners.get(key).add(modName);
+  };
   const addBuff = (id, name, source, modName) => {
     const key = String(id || '').trim();
     if (!key) return;
@@ -125,12 +135,24 @@ export function keywordTables(letheRoot) {
       const p = join(base, 'custom_limbus_locale', 'EN', dir);
       if (!existsSync(p)) continue;
       for (const f of readdirSync(p)) {
-        for (const e of entriesOf(readJsonSafe(join(p, f)))) addBuff(e.id, e.name, 'mod', mod);
+        for (const e of entriesOf(readJsonSafe(join(p, f)))) { addBuff(e.id, e.name, 'mod', mod); own(mod, e.id); }
       }
     }
+    // Mod 数据文件里声明的 Buff 实体（没有 locale 名时用 id 兜底，保证"能检测到就一定列出来"）
+    try {
+      const bdir = join(base, 'custom_limbus_data', 'buff');
+      if (existsSync(bdir)) {
+        for (const f of readdirSync(bdir)) {
+          if (!/\.json$/i.test(f)) continue;
+          const doc = readJsonSafe(join(bdir, f));
+          const arr = Array.isArray(doc) ? doc : (doc && Array.isArray(doc.list) ? doc.list : (doc && doc.id ? [doc] : []));
+          for (const e of arr) if (e && e.id) { addBuff(e.id, e.name || '', 'mod', mod); own(mod, e.id); }
+        }
+      }
+    } catch { /* 坏文件忽略 */ }
     const cb = join(base, 'custom_buffs');
     if (existsSync(cb)) {
-      for (const f of readdirSync(cb)) if (/\.txt$/i.test(f)) addBuff(f.replace(/\.txt$/i, ''), '', 'mod', mod);
+      for (const f of readdirSync(cb)) if (/\.txt$/i.test(f)) { const bid = f.replace(/\.txt$/i, ''); addBuff(bid, '', 'mod', mod); own(mod, bid); }
     }
   }
 
@@ -170,6 +192,8 @@ export function keywordTables(letheRoot) {
     buffs,
     keywords,
     buffIds: [...buffIds.entries()].map(([id, zh]) => ({ id, zh })),
+    modBuffs: [...modBuffIds.entries()].map(([mod, set]) => ({ mod, ids: [...set].sort((a, b) => a.localeCompare(b)) })),
+    buffOwners: [...buffOwners.entries()].map(([id, set]) => ({ id, mods: [...set] })),
     keywordIds: [...kwIds.entries()].map(([id, zh]) => ({ id, zh })),
     stats: {
       timings: timings.length,

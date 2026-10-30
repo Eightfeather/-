@@ -1,0 +1,242 @@
+{
+  "generatedAt": "2026-10-30T14:23:08.793Z",
+  "from": null,
+  "replacedFromSource": 0,
+  "groups": {
+    "frames": {
+      "title": "面板/卡片/边框",
+      "count": 14,
+      "file": "frames.css"
+    },
+    "dock": {
+      "title": "底栏与铭牌",
+      "count": 5,
+      "file": "dock.css"
+    },
+    "nav": {
+      "title": "导航图标与按键",
+      "count": 8,
+      "file": "nav.css"
+    },
+    "sinner-cards": {
+      "title": "罪人头像卡",
+      "count": 13,
+      "file": "sinner-cards.css"
+    },
+    "sinner-emblems": {
+      "title": "罪人纹章",
+      "count": 12,
+      "file": "sinner-emblems.css"
+    }
+  },
+  "vars": {
+    "frame-card-back": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-card-hi": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-card-plain": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-card": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-circle-hi": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-circle": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-headplate": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-nameplate": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-panel-glow": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-panel": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-rail-panel": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-rule": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-sq-glow": {
+      "group": "frames",
+      "from": null
+    },
+    "frame-sq": {
+      "group": "frames",
+      "from": null
+    },
+    "dock-bar-dark": {
+      "group": "dock",
+      "from": null
+    },
+    "dock-bar": {
+      "group": "dock",
+      "from": null
+    },
+    "dock-emblem-box": {
+      "group": "dock",
+      "from": null
+    },
+    "dock-nav-base": {
+      "group": "dock",
+      "from": null
+    },
+    "dock-plate": {
+      "group": "dock",
+      "from": null
+    },
+    "nav-close": {
+      "group": "nav",
+      "from": null
+    },
+    "nav-ico-edit": {
+      "group": "nav",
+      "from": null
+    },
+    "nav-ico-home": {
+      "group": "nav",
+      "from": null
+    },
+    "nav-ico-import": {
+      "group": "nav",
+      "from": null
+    },
+    "nav-ico-mods": {
+      "group": "nav",
+      "from": null
+    },
+    "nav-key-on": {
+      "group": "nav",
+      "from": null
+    },
+    "nav-key": {
+      "group": "nav",
+      "from": null
+    },
+    "nav-plus": {
+      "group": "nav",
+      "from": null
+    },
+    "sinner-card-01": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-02": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-03": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-04": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-05": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-06": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-07": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-08": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-09": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-10": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-11": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-12": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-card-glow": {
+      "group": "sinner-cards",
+      "from": null
+    },
+    "sinner-emblem-01": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-02": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-03": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-04": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-05": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-06": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-07": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-08": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-09": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-10": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-11": {
+      "group": "sinner-emblems",
+      "from": null
+    },
+    "sinner-emblem-12": {
+      "group": "sinner-emblems",
+      "from": null
+    }
+  }
+}

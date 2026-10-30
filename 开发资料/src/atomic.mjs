@@ -56,7 +56,7 @@ export function backupFile(abs, backupDir, rel) {
 
 /** 只清理内部回滚记录（journal/rollback），用户备份与自动保存永不自动删除 */
 export function pruneRollback(rootDir, keep = BACKUP_KEEP) {
-  const base = join(rootDir, BACKUP_DIRNAME, 'journal', 'rollback');
+  const base = join(rootDir, 'LCW', 'journal', 'rollback');
   if (!fs.existsSync(base)) return [];
   const removed = [];
   for (const mod of fs.readdirSync(base, { withFileTypes: true })) {
@@ -85,7 +85,7 @@ export function pruneRollback(rootDir, keep = BACKUP_KEEP) {
  */
 export function writeFilesTransactional({ modDir, files, root, mod, backup = true }) {
   if (!Array.isArray(files) || !files.length) return { written: [], backups: [], snapshot: null, changes: [] };
-  const journalDir = join(root, BACKUP_DIRNAME, 'journal');
+  const journalDir = join(root, 'LCW', 'journal');
   const rollbackDir = join(journalDir, 'rollback', mod || 'mod', stamp());
   const staged = [];
   const backups = [];
@@ -93,10 +93,15 @@ export function writeFilesTransactional({ modDir, files, root, mod, backup = tru
   for (const f of files) {
     const rel = String(f.rel).split('/').join(sep);
     const abs = join(modDir, rel);
-    const buf = Buffer.isBuffer(f.content) ? f.content : Buffer.from(String(f.content), 'utf8');
-    if (buf.length > MAX_FILE_BYTES) throw new Error(`文件过大：${f.rel}`);
     let before = null;
     try { if (fs.existsSync(abs)) before = fs.readFileSync(abs); } catch { before = null; }
+    // content === null 表示删除该文件（人格删除等场景）
+    if (f.content === null) {
+      staged.push({ abs, tmp: null, rel: f.rel, before, after: null, fresh: false, del: true });
+      continue;
+    }
+    const buf = Buffer.isBuffer(f.content) ? f.content : Buffer.from(String(f.content), 'utf8');
+    if (buf.length > MAX_FILE_BYTES) throw new Error(`文件过大：${f.rel}`);
     ensureDir(dirname(abs));
     const tmp = join(dirname(abs), `.${basename(abs)}.tmp-${process.pid}-${Date.now()}-${staged.length}`);
     const fd = fs.openSync(tmp, 'w');
@@ -117,6 +122,7 @@ export function writeFilesTransactional({ modDir, files, root, mod, backup = tru
   const done = [];
   try {
     for (const s of staged) {
+      if (s.del) { fs.rmSync(s.abs, { force: true }); done.push(s); continue; }
       fs.renameSync(s.tmp, s.abs);
       done.push(s);
     }
@@ -127,7 +133,7 @@ export function writeFilesTransactional({ modDir, files, root, mod, backup = tru
         else fs.writeFileSync(s.abs, s.before);
       } catch { /* ignore */ }
     }
-    for (const s of staged) { try { fs.rmSync(s.tmp, { force: true }); } catch { /* ignore */ } }
+    for (const s of staged) { if (s.tmp) { try { fs.rmSync(s.tmp, { force: true }); } catch { /* ignore */ } } }
     throw err;
   }
   pruneRollback(root);
@@ -137,7 +143,7 @@ export function writeFilesTransactional({ modDir, files, root, mod, backup = tru
     changes: staged.map((s) => ({
       rel: s.rel,
       before: s.before === null ? null : s.before.toString('utf8'),
-      after: s.after.toString('utf8'),
+      after: s.after === null ? null : s.after.toString('utf8'),
       fresh: s.fresh,
     })),
   };

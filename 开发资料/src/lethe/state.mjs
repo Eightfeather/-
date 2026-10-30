@@ -1,21 +1,20 @@
 import * as fs from 'node:fs';
 import { join } from 'node:path';
-import { BACKUP_DIRNAME, readJson, writeFileAtomic } from '../atomic.mjs';
+import { readJson, writeFileAtomic } from '../atomic.mjs';
+import { lcwDir, legacyDir, backupsDir, userBackupsDir, autoBackupsDir, dllBackupsDir, journalDir, statePath as lcwStatePath, sessionPath } from './lcw.mjs';
 
 export const STATE_NAME = 'state.json';
 export const DEFAULT_EDITOR_NAME = '但丁';
 
-export function workbenchDir(letheRoot) { return join(letheRoot, BACKUP_DIRNAME); }
-export function statePath(letheRoot) { return join(workbenchDir(letheRoot), STATE_NAME); }
-export function disabledModsDir(letheRoot) { return join(workbenchDir(letheRoot), 'disabled', 'mods'); }
-export function disabledDllsDir(letheRoot) { return join(workbenchDir(letheRoot), 'disabled', 'dlls'); }
+/** 编辑器数据根（LCW）。禁用目录仍留在旧位置，避免已禁用的 Mod 被移动两次。 */
+export function workbenchDir(letheRoot) { return lcwDir(letheRoot); }
+export function statePath(letheRoot) { return lcwStatePath(letheRoot); }
+export function disabledModsDir(letheRoot) { return join(legacyDir(letheRoot), 'disabled', 'mods'); }
+export function disabledDllsDir(letheRoot) { return join(legacyDir(letheRoot), 'disabled', 'dlls'); }
 
 /** 目录拆分：backups/用户保存、backups/自动保存、journal（内部回滚与操作流水） */
-export function backupsRoot(letheRoot) { return join(workbenchDir(letheRoot), 'backups'); }
-export function userBackupsDir(letheRoot) { return join(backupsRoot(letheRoot), '用户保存'); }
-export function autoBackupsDir(letheRoot) { return join(backupsRoot(letheRoot), '自动保存'); }
-export function journalDir(letheRoot) { return join(workbenchDir(letheRoot), 'journal'); }
-export function dllBackupsDir(letheRoot) { return join(workbenchDir(letheRoot), 'backups', 'DLL'); }
+export { backupsDir, userBackupsDir, autoBackupsDir, dllBackupsDir, journalDir };
+export function backupsRoot(letheRoot) { return backupsDir(letheRoot); }
 
 export function readState(letheRoot) {
   const st = readJson(statePath(letheRoot), null);
@@ -40,7 +39,7 @@ export function updateState(letheRoot, fn) {
 }
 
 /** 运行标记：用于检测“软件未被正常关闭” */
-export function sessionMarkerPath(letheRoot) { return join(workbenchDir(letheRoot), 'session.json'); }
+export function sessionMarkerPath(letheRoot) { return sessionPath(letheRoot); }
 
 export function markRunning(letheRoot) {
   if (!letheRoot) return null;

@@ -24,13 +24,13 @@ const FUSE = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
 
 if (!existsSync(join(CACHE, 'node_modules', 'esbuild'))) throw new Error(`缺少构建依赖：${CACHE}`);
 
-function walk(dir) {
+function walk(dir, base = dir) {
   const out = [];
   for (const name of readdirSync(dir)) {
     const abs = join(dir, name);
     const st = statSync(abs);
-    if (st.isDirectory()) out.push(...walk(abs));
-    else out.push({ abs, rel: relative(dir, abs).split('\\').join('/') });
+    if (st.isDirectory()) out.push(...walk(abs, base));
+    else out.push({ abs, rel: relative(base, abs).split('\\').join('/') });
   }
   return out;
 }

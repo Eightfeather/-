@@ -96,8 +96,11 @@ export function readModPayload(modDirPath) {
       if (!parsed) continue;
       const rel = relOf(modDirPath, file);
       entitiesOf(parsed).forEach((entity, index) => {
-        if (!entity || entity.id == null) return;
-        (data[cat] ||= []).push({ id: entity.id, rel, index, entity });
+        if (!entity) return;
+        // personality-passive 这类实体用 personalityID 而不是 id
+        const key = entity.id != null ? entity.id : entity.personalityID;
+        if (key == null) return;
+        (data[cat] ||= []).push({ id: key, rel, index, entity });
       });
     }
   }

@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { migrateToLcw, ensureLcwPart } from '../lethe/lcw.mjs';
 import { ARG_COUNTS } from '../knowledge/arg-counts.mjs';
 import { join } from 'node:path';
 import { APP_ROOT, USER_DATA_DIR } from '../paths.mjs';
@@ -6,7 +7,9 @@ import { configPath, rememberRoot, saveConfig } from '../config.mjs';
 import { locate, scanStats } from '../locate.mjs';
 import { createMod, disableMod, dirOf, enableMod, listMods, modDir, readModPayload, resolveModDir } from '../lethe/mods.mjs';
 import { listDlls, setDllEnabled } from '../lethe/dlls.mjs';
-import { createPersonality, getPersonality, listPersonalities, savePersonality } from '../lethe/personality.mjs';
+import { appearanceOptions, writePortrait, deletePersonality, passiveEdit, personalitySource, savePersonalitySource, isSourceLocked,  createPersonality, getPersonality, getPersonalityAny, listPersonalities, materializeVanilla, personalityIdTaken, personalityStats, savePersonality} from '../lethe/personality.mjs';
+import { i18nTables } from '../knowledge/personality-i18n.mjs';
+import { isUnitIdTaken, searchUnits, unitCounts } from '../lethe/units.mjs';
 import { vanillaIndex } from '../lethe/vanilla.mjs';
 import { createDllBackup, createUserBackup, listDllBackups, listUserBackups, readBackupPayload, swapBackup } from '../lethe/backups.mjs';
 import { autoBackupsDir, journalDir, markCleanExit, markRunning, readSessionMarker, readState, updateState, writeState } from '../lethe/state.mjs';
@@ -29,6 +32,15 @@ import { SCOPES, TIMING_SCOPE, COMMAND_SCOPE, TIMING_CONTAINERS, COMMAND_CONTAIN
 import { createApi } from './api-shared.mjs';
 import { compileProgram, compileTimingRows } from '../lethe/program.mjs';
 import { saveCompiledBuff, saveCompiledPassive, saveCompiledSkill } from '../lethe/apply.mjs';
+
+function ensureRoot(state) {
+  if (!state || !state.letheRoot) {
+    const e = new Error('还没有定位到私服：先在设置里选择 Lethe 目录');
+    e.status = 428;
+    throw e;
+  }
+  return state.letheRoot;
+}
 
 export function buildApi(ctx) {
   const { state, log, session, autosave } = ctx;
@@ -93,6 +105,8 @@ export function buildApi(ctx) {
       });
       if (result.best) {
         state.letheRoot = result.best.letheRoot;
+      migrateToLcw(state.letheRoot, log);
+        migrateToLcw(state.letheRoot, log);
         state.gameRoot = result.best.gameRoot;
         state.locatedAt = new Date().toISOString();
         state.source = result.best.from;
@@ -111,6 +125,7 @@ export function buildApi(ctx) {
         throw err;
       }
       state.letheRoot = result.best.letheRoot;
+      migrateToLcw(state.letheRoot, log);
       state.gameRoot = result.best.gameRoot;
       state.locatedAt = new Date().toISOString();
       state.source = 'manual';
@@ -297,15 +312,122 @@ export function buildApi(ctx) {
       return { ok: true, characters: idx.characters, personalities: list };
     },
 
-    'GET /api/personality': (q) => {
+  'GET /api/personality/appearance-options': () => {
+    ensureRoot(state);
+    return { ok: true, options: appearanceOptions(state.letheRoot) };
+  },
+
+  'POST /api/personality/portrait': async (body) => {
+    ensureRoot(state);
+    return {
+      ok: true,
+      ...writePortrait(state.letheRoot, {
+        name: String(body.name || ''),
+        id: body.id,
+        kind: String(body.kind || 'profile'),
+        dataUrl: String(body.dataUrl || ''),
+      }),
+    };
+  },
+
+  'POST /api/personality/delete': async (body) => {
+    ensureRoot(state);
+    const res = deletePersonality(state.letheRoot, String(body.name || ''), body.id);
+    session.clear(String(body.name || ''));
+    return { ok: true, ...res };
+  },
+
+  'POST /api/personality/passive': async (body) => {
+    ensureRoot(state);
+    const res = passiveEdit(state.letheRoot, {
+      name: String(body.name || ''),
+      id: body.id,
+      kind: String(body.kind || 'battle'),
+      op: String(body.op || 'add'),
+      passiveId: String(body.passiveId || ''),
+      level: body.level,
+    });
+    autosave.touch(String(body.name || ''));
+    return { ok: true, ...res };
+  },
+
+  'GET /api/personality/source': (q) => {
+    ensureRoot(state);
+    return { ok: true, ...personalitySource(state.letheRoot, String(q.get('name') || ''), q.get('id')) };
+  },
+
+  'POST /api/personality/source': async (body) => {
+    ensureRoot(state);
+    const res = savePersonalitySource(state.letheRoot, {
+      name: String(body.name || ''),
+      id: body.id,
+      entity: body.entity,
+      locale: body.locale,
+    });
+    autosave.touch(String(body.name || ''));
+    return { ok: true, ...res };
+  },
+
+  'GET /api/personality/i18n': () => {
+    const root = state.letheRoot;
+    if (!root) return { ok: true, tables: null };
+    const t = i18nTables(root);
+    return { ok: true, tables: { sins: t.sins, skillKeywords: t.skillKeywords, rankLabel: t.rankLabel, unitKeyword: t.unitKeyword, association: t.association } };
+  },
+
+  'GET /api/personality/stats': (q) => {
+    const root = state.letheRoot;
+    if (!root) throw new SafetyError(NOT_LOCATED);
+    const stats = personalityStats(root, q.get('name') || state.selected, q.get('id'));
+    if (!stats) throw new SafetyError('人格不存在：' + q.get('id'));
+    return { ok: true, stats };
+  },
+
+  'GET /api/personality/id-taken': (q) => {
+    const root = state.letheRoot;
+    if (!root) throw new SafetyError(NOT_LOCATED);
+    const id = String(q.get('id') || '').trim();
+    if (!/^\d{3,10}$/.test(id)) return { ok: true, valid: false, reason: 'id 必须是 3–10 位数字', taken: null };
+    return { ok: true, valid: true, taken: personalityIdTaken(root, id) };
+  },
+
+  'GET /api/unit-search': (q) => {
+    const root = state.letheRoot;
+    if (!root) throw new SafetyError(NOT_LOCATED);
+    const kind = String(q.get('kind') || 'skill');
+    if (!['personality', 'skill', 'passive', 'buff'].includes(kind)) throw new SafetyError('kind 只能是 personality / skill / passive / buff');
+    const limit = Math.max(1, Math.min(100, Number(q.get('limit')) || 30));
+    return { ok: true, kind, rows: searchUnits(root, kind, q.get('q') || '', limit), counts: unitCounts(root) };
+  },
+
+  'GET /api/unit-id-taken': (q) => {
+    const root = state.letheRoot;
+    if (!root) throw new SafetyError(NOT_LOCATED);
+    const kind = String(q.get('kind') || 'personality');
+    return { ok: true, taken: isUnitIdTaken(root, kind, q.get('id')) };
+  },
+
+  'POST /api/personality/copy-vanilla': async (body) => {
+    const root = state.letheRoot;
+    if (!root) throw new SafetyError(NOT_LOCATED);
+    const name = body.name || state.selected;
+    if (!name) throw new SafetyError('请先选择一个 Mod');
+    const res = materializeVanilla(root, name, body.vanillaId || body.id);
+    session.clear(name, 'personality:' + res.id);
+    autosave.touch(name);
+    return { ok: true, personality: { id: res.id, entity: res.entity, locale: res.locale }, written: res.written };
+  },
+
+  'GET /api/personality': (q) => {
       const { letheRoot } = need();
-      const one = getPersonality(letheRoot, q.get('name'), q.get('id'));
+      const one = getPersonalityAny(letheRoot, q.get('name'), q.get('id'));
+      const locked = one ? isSourceLocked(letheRoot, q.get('name'), String(q.get('id'))) : false;
       if (!one) {
         const err = new Error('找不到这个人格');
         err.status = 404;
         throw err;
       }
-      return { ok: true, personality: one };
+      return { ok: true, personality: { ...one, locked } };
     },
 
     /** 编辑即应用：写入变化字段，记录一个撤销步骤 */
@@ -373,6 +495,8 @@ export function buildApi(ctx) {
           });
         })(),
         keywords: t.keywords.map((x) => ({ id: x.id, zh: x.zh })),
+        modBuffs: t.modBuffs || [],
+        buffOwners: t.buffOwners || [],
         stats: t.stats,
         physical: PHYSICAL_TYPES,
         sin: SIN_TYPES,

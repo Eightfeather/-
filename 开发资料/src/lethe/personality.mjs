@@ -5,12 +5,16 @@ import { cleanName, SafetyError } from '../safety.mjs';
 import { entitiesOf, findLocaleEntry, localeEntriesOf, modDirSafe, readModPayload } from './mods.mjs';
 import { ensureLayout } from './layout.mjs';
 import { vanillaTemplate } from './vanilla.mjs';
+import { isUnitIdTaken } from './units.mjs';
+import { projectsDir } from './lcw.mjs';
 
 const ENTITY_FIELDS = ['appearance', 'rank', 'hp', 'defCorrection', 'minSpeedList', 'maxSpeedList',
   'uniqueAttribute', 'panicType', 'panicSkillOnErosion', 'attributeList', 'defenseSkillIDList',
   'mentalConditionInfo', 'breakSection', 'resistInfo', 'unitKeywordList', 'associationList',
-  'skillKeywordList', 'slotWeightConditionList', 'season'];
+  'skillKeywordList', 'slotWeightConditionList', 'season', 'initBuffList', 'unitScriptID'];
 const LOCALE_FIELDS = ['name', 'title', 'desc', 'oneLineTitle', 'acquisitionMethod', 'skinItemTitle', 'skinItemDesc'];
+const ATK_TYPES = ['SLASH', 'PENETRATE', 'HIT'];
+const SIN_IDS = ['CRIMSON', 'SCARLET', 'AMBER', 'SHAMROCK', 'AZURE', 'INDIGO', 'VIOLET', 'WHITE', 'BLACK'];
 
 function pick(obj, fields) {
   const out = {};
@@ -19,6 +23,134 @@ function pick(obj, fields) {
 }
 
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+const intIn = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+
+function bad(msg) { throw new SafetyError(msg); }
+
+function strList(v, field, maxLen = 40, maxItems = 60) {
+  if (!Array.isArray(v)) bad(`${field} 必须是字符串数组`);
+  if (v.length > maxItems) bad(`${field} 条目过多（上限 ${maxItems}）`);
+  for (const x of v) {
+    if (typeof x !== 'string') bad(`${field} 里只能放字符串`);
+    if (x.length > maxLen) bad(`${field} 单条过长（上限 ${maxLen} 字）`);
+  }
+  return v.map((x) => x.trim()).filter(Boolean);
+}
+
+/** 校验并归一化可编辑字段（只校验用户提交的键）。 */
+export function normalizePersonalityPatch(entity = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(pick(entity, ENTITY_FIELDS))) {
+    switch (k) {
+      case 'rank': if (!intIn(v, 1, 3)) bad('稀有度只能是 1 / 2 / 3'); out[k] = v; break;
+      case 'hp': {
+        if (!v || typeof v !== 'object') bad('血量必须是对象');
+        if (v.defaultStat !== undefined && (!isNum(v.defaultStat) || v.defaultStat < 1 || v.defaultStat > 99999)) bad('基础血量必须是正数');
+        if (v.incrementByLevel !== undefined && (!isNum(v.incrementByLevel) || v.incrementByLevel < 0 || v.incrementByLevel > 999)) bad('每级成长必须是 0–999 的数字');
+        out[k] = v; break;
+      }
+      case 'defCorrection': if (!isNum(v) || v < -50 || v > 50) bad('防御等级修正必须是 -50–50 的数字'); out[k] = v; break;
+      case 'minSpeedList': case 'maxSpeedList': {
+        if (!Array.isArray(v) || v.length < 1 || v.length > 4) bad('速度必须是 1–4 个数字');
+        for (const n of v) if (!isNum(n) || n < 1 || n > 30) bad('速度必须是 1–30 的数字');
+        out[k] = v; break;
+      }
+      case 'uniqueAttribute': if (v === '' || v == null) break; if (!SIN_IDS.includes(v)) bad('罪孽属性只能是 ' + SIN_IDS.join(' / ')); out[k] = v; break;
+      case 'breakSection': {
+        if (!v || !Array.isArray(v.sectionList) || v.sectionList.length < 1 || v.sectionList.length > 3) bad('混乱阈值必须是 1–3 个百分比');
+        let prev = 101;
+        for (const n of v.sectionList) {
+          if (!isNum(n) || n <= 0 || n > 100) bad('混乱阈值必须是 0–100 的百分比');
+          if (n >= prev) bad('混乱阈值必须从高到低递减');
+          prev = n;
+        }
+        out[k] = { sectionList: v.sectionList }; break;
+      }
+      case 'resistInfo': {
+        if (!v || !Array.isArray(v.atkResistList)) bad('物理抗性必须是列表');
+        if (v.atkResistList.length > 3) bad('物理抗性最多三行');
+        const seen = new Set();
+        const rows = v.atkResistList.map((r) => {
+          if (!r || !ATK_TYPES.includes(r.type)) bad('物理抗性类型只能是 SLASH / PENETRATE / HIT');
+          if (seen.has(r.type)) bad('物理抗性类型重复：' + r.type);
+          seen.add(r.type);
+          if (!isNum(r.value) || r.value < 0 || r.value > 10) bad('抗性倍率必须是 0–10 的数字');
+          return { type: r.type, value: r.value };
+        });
+        out[k] = { ...v, atkResistList: rows }; break;
+      }
+      case 'attributeList': {
+        if (!Array.isArray(v) || v.length > 12) bad('技能列表最多 12 条');
+        out[k] = v.map((r) => {
+          if (!r || !Number.isInteger(Number(r.skillId)) || Number(r.skillId) <= 0) bad('技能 id 必须是正整数');
+          const number = r.number === undefined || r.number === null ? 1 : Number(r.number);
+          if (!Number.isInteger(number) || number < 0 || number > 99) bad('技能数量必须是 0–99 的整数');
+          return { skillId: Number(r.skillId), number };
+        }); break;
+      }
+      case 'defenseSkillIDList': {
+        if (!Array.isArray(v) || v.length > 6) bad('守备技能最多 6 条');
+        out[k] = v.map((x) => {
+          if (!Number.isInteger(Number(x)) || Number(x) <= 0) bad('守备技能 id 必须是正整数');
+          return Number(x);
+        }); break;
+      }
+      case 'appearance': if (typeof v !== 'string' || v.length > 160) bad('外观资源名必须是 1–160 字符的文本'); out[k] = v.trim(); break;
+      case 'unitKeywordList': case 'associationList': case 'skillKeywordList':
+        out[k] = strList(v, k); break;
+      case 'initBuffList': {
+        if (!Array.isArray(v) || v.length > 4) bad('初始 Buff 的升阶组最多 4 组');
+        out[k] = v.map((g) => {
+          if (!g || !intIn(Number(g.level), 1, 4)) bad('初始 Buff 的 level 必须是 1–4');
+          if (!Array.isArray(g.list) || g.list.length > 12) bad('每组初始 Buff 最多 12 条');
+          return {
+            level: Number(g.level),
+            list: g.list.map((b) => {
+              if (!b || typeof b.buff !== 'string' || !b.buff.trim()) bad('初始 Buff 必须填写 buff id');
+              const item = { buff: b.buff.trim() };
+              if (b.stack !== undefined && b.stack !== null && b.stack !== '') {
+                if (!intIn(Number(b.stack), 0, 999)) bad('初始 Buff 的强度必须是 0–999');
+                item.stack = Number(b.stack);
+              } else item.stack = 0;
+              if (b.turn !== undefined && b.turn !== null && b.turn !== '') {
+                if (!intIn(Number(b.turn), 0, 999)) bad('初始 Buff 的层数必须是 0–999');
+                item.turn = Number(b.turn);
+              }
+              return item;
+            }),
+          };
+        }); break;
+      }
+      case 'unitScriptID': if (typeof v !== 'string' || v.length > 20) bad('unitScriptID 必须是文本'); out[k] = v; break;
+      default: out[k] = v;
+    }
+  }
+  return out;
+}
+
+function readVanillaPersonality(letheRoot, id) {
+  const dir = join(letheRoot, 'dumpedData', 'limbus_data', 'personality');
+  let hit = null;
+  const walk = (d) => {
+    let list = [];
+    try { list = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of list) {
+      if (hit) return;
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.json$/i.test(e.name)) {
+        const doc = readJson(p, null);
+        for (const ent of entitiesOf(doc)) if (ent && String(ent.id) === String(id)) { hit = ent; return; }
+      }
+    }
+  };
+  walk(dir);
+  if (!hit) return null;
+  const loc = readJson(join(letheRoot, 'dumpedData', 'limbus_locale', 'EN', 'personalityList.json'), {}) || {};
+  const entry = Array.isArray(loc.list) ? loc.list.find((x) => String(x.id) === String(id)) : loc[String(id)];
+  return { entity: hit, locale: entry || null };
+}
 
 export function getPersonality(letheRoot, name, id) {
   const dir = modDirSafe(letheRoot, name);
@@ -26,7 +158,16 @@ export function getPersonality(letheRoot, name, id) {
   const entry = (p.data.personality || []).find((x) => String(x.id) === String(id));
   if (!entry) return null;
   const loc = findLocaleEntry(p.locales.EN?.personality, id);
-  return { id: entry.id, entity: entry.entity, locale: loc, rel: entry.rel, hasLocale: Boolean(loc) };
+  return { id: entry.id, entity: entry.entity, locale: loc, rel: entry.rel, hasLocale: Boolean(loc), inMod: true };
+}
+
+/** 读人格：Mod 内没有时回退到原版（用于「点原版人格直接编辑」）。 */
+export function getPersonalityAny(letheRoot, name, id) {
+  const inMod = getPersonality(letheRoot, name, id);
+  if (inMod) return inMod;
+  const van = readVanillaPersonality(letheRoot, id);
+  if (!van) return null;
+  return { id: Number(id), entity: van.entity, locale: van.locale, rel: null, hasLocale: Boolean(van.locale), inMod: false, vanilla: true };
 }
 
 export function listPersonalities(letheRoot, name) {
@@ -54,19 +195,87 @@ export function skillIdsOf(entity) {
   return ids;
 }
 
+/** 首次编辑原版人格时，把它整份复制进 Mod（原 id 覆盖）。 */
+export function materializeVanilla(letheRoot, name, id) {
+  const modName = cleanName(name, 'Mod 名称');
+  const dir = modDirSafe(letheRoot, modName);
+  if (!fs.existsSync(dir)) throw new SafetyError(`Mod 不存在：${name}`);
+  const van = readVanillaPersonality(letheRoot, id);
+  if (!van) throw new SafetyError(`找不到原版人格：${id}`);
+  const pid = String(id);
+  const stem = cleanName(String(van.entity.appearance || pid).slice(0, 60).replace(/[^\w.-]+/g, '_'), '文件名');
+  const entity = {
+    ...JSON.parse(JSON.stringify(van.entity)),
+    id: Number(pid),
+    updatedDate: Number(new Date().toISOString().slice(0, 10).replace(/-/g, '')),
+  };
+  const entry = van.locale ? JSON.parse(JSON.stringify(van.locale)) : { id: pid, name: String(pid), title: '', desc: '' };
+  // 从原版复制时不要自动带称号/描述（文档 17 第 10 条）：名称与 id 保留，称号/描述清空
+  entry.id = pid;
+  if (!entry.name) entry.name = String(pid);
+  entry.title = '';
+  entry.desc = '';
+  entry.oneLineTitle = '';
+  ensureLayout(dir, 'personality');
+  const files = [
+    { rel: `custom_limbus_data/personality/${stem}.json`, content: JSON.stringify({ list: [entity] }, null, 2) },
+    { rel: `custom_limbus_locale/EN/personalityList/${stem}.json`, content: JSON.stringify({ [pid]: entry }, null, 2) },
+  ];
+  const result = writeFilesTransactional({ modDir: dir, files, root: letheRoot, mod: modName });
+  return { id: pid, entity, locale: entry, materialized: true, ...result };
+}
+
 /**
  * 保存人格：只写真正变化的字段（未知字段原样保留）。
- * 返回 changes（before/after），供编辑会话记录撤销/重做。
+ * 若该 id 只存在于原版，会先把原版整份复制进 Mod（原 id 覆盖），再打补丁。
  */
-export function savePersonality(letheRoot, { name, id, entity = {}, locale = {} }) {
+/** 手改源码后的锁定记录：LCW/projects/personalities/<Mod>/<id>.json */
+function sourceLockPath(letheRoot, modName, id) {
+  return join(projectsDir(letheRoot), 'personalities', modName, id + '.json');
+}
+function readMetaDoc(letheRoot, modName, id) {
+  try {
+    const doc = JSON.parse(fs.readFileSync(sourceLockPath(letheRoot, modName, id), 'utf8'));
+    return doc && typeof doc === 'object' ? doc : {};
+  } catch {
+    return {};
+  }
+}
+export function isSourceLocked(letheRoot, modName, id) {
+  try {
+    const doc = JSON.parse(fs.readFileSync(sourceLockPath(letheRoot, modName, id), 'utf8'));
+    return doc && doc.sourceLocked === true;
+  } catch {
+    return false;
+  }
+}
+function setSourceLocked(letheRoot, modName, id, locked) {
+  const file = sourceLockPath(letheRoot, modName, id);
+  fs.mkdirSync(join(file, '..'), { recursive: true });
+  const prev = readMetaDoc(letheRoot, modName, String(id));
+  fs.writeFileSync(file, JSON.stringify({ ...prev, sourceLocked: !!locked, at: new Date().toISOString() }, null, 2), 'utf8');
+}
+
+export function savePersonality(letheRoot, { name, id, entity = {}, locale = {}, ignoreLock = false }) {
+  const lockMod = cleanName(name, 'Mod 名称');
+  if (!ignoreLock && isSourceLocked(letheRoot, lockMod, String(id))) {
+    throw new SafetyError('这个人格的源码已被手动修改并锁定：请到「查看源代码」里修改，或删除该人格后重建');
+  }
   const dir = modDirSafe(letheRoot, name);
-  const p = readModPayload(dir);
-  const found = (p.data.personality || []).find((x) => String(x.id) === String(id));
-  if (!found) throw new SafetyError(`人格不存在：${id}`);
+  let p = readModPayload(dir);
+  let found = (p.data.personality || []).find((x) => String(x.id) === String(id));
+  let materialized = false;
+  if (!found) {
+    materializeVanilla(letheRoot, name, id);
+    materialized = true;
+    p = readModPayload(dir);
+    found = (p.data.personality || []).find((x) => String(x.id) === String(id));
+    if (!found) throw new SafetyError(`人格不存在：${id}`);
+  }
 
   const files = [];
   const labels = [];
-  const entPatch = pick(entity, ENTITY_FIELDS);
+  const entPatch = normalizePersonalityPatch(entity);
   const entDiff = {};
   for (const [k, v] of Object.entries(entPatch)) {
     if (!same(found.entity?.[k], v)) entDiff[k] = v;
@@ -84,6 +293,8 @@ export function savePersonality(letheRoot, { name, id, entity = {}, locale = {} 
   const locPatch = pick(locale, LOCALE_FIELDS);
   const locDiff = {};
   for (const [k, v] of Object.entries(locPatch)) {
+    if (typeof v !== 'string') bad('本地化字段必须是字符串');
+    if (v.length > 4000) bad('文本过长（上限 4000 字）');
     if (!locEntry || !same(locEntry[k], v)) locDiff[k] = v;
   }
   if (Object.keys(locDiff).length) {
@@ -102,25 +313,18 @@ export function savePersonality(letheRoot, { name, id, entity = {}, locale = {} 
     labels.push(...Object.keys(locDiff));
   }
 
-  if (!files.length) return { changed: false, changes: [], fields: [] };
+  if (!files.length) return { changed: false, changes: [], fields: [], materialized };
   const result = writeFilesTransactional({ modDir: dir, files, root: letheRoot, mod: cleanName(name) });
-  return { changed: true, fields: labels, ...result };
+  return { changed: true, fields: labels, materialized, ...result };
 }
 
-function nextId(letheRoot, name, characterId) {
-  const dir = modDirSafe(letheRoot, name);
-  const p = readModPayload(dir);
-  const used = new Set((p.data.personality || []).map((x) => String(x.id)));
-  const base = Number(characterId) * 10000;
-  for (let i = 501; i < 1000; i += 1) {
-    const id = String(base + i);
-    if (!used.has(id)) return id;
-  }
-  throw new SafetyError('该罪人的人格编号已用尽，请手动指定 id');
+export function personalityIdTaken(letheRoot, id) {
+  return isUnitIdTaken(letheRoot, 'personality', id);
 }
 
 /**
  * 新建人格：以原版同罪人实体为模板（保证字段合法），清空技能引用，写入本 Mod。
+ * id 必须由用户填写，且全局唯一（原版 + 全部 Mod，含被禁用）。
  */
 export function createPersonality(letheRoot, { name, characterId, id, displayName, title = '', desc = '', appearance = '', rank, hp }) {
   const modName = cleanName(name, 'Mod 名称');
@@ -128,14 +332,13 @@ export function createPersonality(letheRoot, { name, characterId, id, displayNam
   if (!fs.existsSync(dir)) throw new SafetyError(`Mod 不存在：${name}`);
   const cid = Number(characterId);
   if (!Number.isInteger(cid) || cid <= 0) throw new SafetyError('characterId 必须是正整数');
+  const pid = String(id == null ? '' : id).trim();
+  if (!/^\d{3,10}$/.test(pid)) throw new SafetyError('人格 id 必须手填 3–10 位数字');
+  const taken = personalityIdTaken(letheRoot, pid);
+  if (taken) throw new SafetyError(`人格 id ${pid} 已被占用（${taken.source === 'vanilla' ? '原版' : taken.mod}）`);
 
   const tmpl = vanillaTemplate(letheRoot, cid);
   if (!tmpl) throw new SafetyError('找不到可用的原版模板（dumpedData 未导出？）');
-
-  const pid = id ? String(id) : nextId(letheRoot, modName, cid);
-  if (!/^\d{3,10}$/.test(pid)) throw new SafetyError('人格 id 必须是 3–10 位数字');
-  const existing = getPersonality(letheRoot, modName, pid);
-  if (existing) throw new SafetyError(`本 Mod 已有人格 id：${pid}`);
 
   const entity = {
     ...JSON.parse(JSON.stringify(tmpl.entity)),
@@ -145,8 +348,9 @@ export function createPersonality(letheRoot, { name, characterId, id, displayNam
     appearance: appearance || tmpl.appearance || '',
     attributeList: [],
     defenseSkillIDList: [],
+    rank: rank != null ? Number(rank) : 3,
+    uniqueAttribute: 'CRIMSON',
   };
-  if (rank != null) entity.rank = Number(rank);
   if (hp && typeof hp === 'object') entity.hp = { ...entity.hp, ...hp };
 
   const entry = {
@@ -170,4 +374,256 @@ export function createPersonality(letheRoot, { name, characterId, id, displayNam
   return { id: pid, entity, locale: entry, created, ...result };
 }
 
+/** 吸顶标题区所需派生数据：Lv65 血量、混乱阈值血量、被动分档、技能数量。 */
+export function personalityStats(letheRoot, name, id) {
+  const one = getPersonalityAny(letheRoot, name, id);
+  if (!one) return null;
+  const e = one.entity || {};
+  const d = Number(e.hp?.defaultStat) || 0;
+  const inc = Number(e.hp?.incrementByLevel) || 0;
+  const hp65 = Math.round(d + inc * 64);
+  const pct = (e.breakSection?.sectionList || []).map((p) => ({ pct: Number(p), hp: Math.round((hp65 * Number(p)) / 100) }));
+  const sp = passiveSetOf(letheRoot, name, id);
+  return {
+    id: one.id,
+    vanilla: Boolean(one.vanilla),
+    inMod: Boolean(one.inMod),
+    hp65,
+    thresholds: pct,
+    rank: e.rank,
+    defCorrection: e.defCorrection,
+    minSpeed: e.minSpeedList || [],
+    maxSpeed: e.maxSpeedList || [],
+    resist: e.resistInfo?.atkResistList || [],
+    skills: { attack: (e.attributeList || []).length, defense: (e.defenseSkillIDList || []).length },
+    passives: sp,
+  };
+}
+
+function readPassiveSet(letheRoot, name, id) {
+  const pick = (doc) => {
+    for (const ent of entitiesOf(doc)) if (ent && String(ent.personalityID) === String(id)) return ent;
+    return null;
+  };
+  const dir = modDirSafe(letheRoot, name);
+  const p = readModPayload(dir);
+  for (const row of p.data['personality-passive'] || []) {
+    const hit = pick(readJson(join(dir, row.rel), null));
+    if (hit) return hit;
+  }
+  const vdir = join(letheRoot, 'dumpedData', 'limbus_data', 'personality-passive');
+  let found = null;
+  const walk = (d) => {
+    let list = [];
+    try { list = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const en of list) {
+      if (found) return;
+      const q = join(d, en.name);
+      if (en.isDirectory()) walk(q);
+      else if (/\.json$/i.test(en.name)) { const hit = pick(readJson(q, null)); if (hit) { found = hit; return; } }
+    }
+  };
+  walk(vdir);
+  return found;
+}
+
+function passiveSetOf(letheRoot, name, id) {
+  const set = readPassiveSet(letheRoot, name, id);
+  const norm = (list) => (list || []).map((g) => ({ level: Number(g.level) || 1, ids: (g.passiveIDList || []).map(Number) }));
+  const battle = norm(set?.battlePassiveList);
+  const supporter = norm(set?.supporterPassiveList);
+  return {
+    battle,
+    supporter,
+    counts: {
+      battle: battle.reduce((n, g) => n + g.ids.length, 0),
+      supporter: supporter.reduce((n, g) => n + g.ids.length, 0),
+    },
+  };
+}
+
 export { localeEntriesOf, readJsonFile };
+
+function pWalk(dir) {
+  const out = [];
+  const walk = (d) => {
+    let names = [];
+    try { names = fs.readdirSync(d); } catch { return; }
+    for (const n of names) {
+      const abs = join(d, n);
+      let st = null;
+      try { st = fs.statSync(abs); } catch { continue; }
+      if (st.isDirectory()) walk(abs);
+      else if (/\.json$/i.test(n)) out.push(abs);
+    }
+  };
+  walk(dir);
+  return out;
+}
+function pRelOf(md, abs) { return String(abs).slice(String(md).length + 1).split('\\').join('/'); }
+function pIdOf(id) {
+  const p = String(id == null ? '' : id).trim();
+  if (!/^\d{4,10}$/.test(p)) throw new SafetyError('人格 id 必须是 4–10 位数字');
+  return p;
+}
+
+/* --------------------------- 细节能力：外观、立绘、删除、被动、源码 --------------------------- */
+
+/** 当前私服所有原版人格用到的外观名（去重、按名字排序） */
+export function appearanceOptions(letheRoot) {
+  const dir = join(letheRoot, 'dumpedData', 'limbus_data', 'personality');
+  const set = new Set();
+  for (const f of pWalk(dir)) {
+    const payload = readJson(f, null);
+    for (const e of entitiesOf(payload)) {
+      const a = e.appearance;
+      if (a && typeof a === 'string' && !a.startsWith('!')) set.add(a);
+    }
+  }
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+/** 写立绘：kind = profile | cg，dataUrl 必须是 png（游戏只认 png 命名） */
+export function writePortrait(letheRoot, { name, id, kind, dataUrl }) {
+  const p = pIdOf(id);
+  if (kind !== 'profile' && kind !== 'cg') bad('立绘类型只能是 profile 或 cg');
+  const mm = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || ''));
+  if (!mm) bad('只接受 PNG 图片（base64 data URL）');
+  const buf = Buffer.from(mm[1], 'base64');
+  if (buf.length > 12 * 1024 * 1024) bad('图片过大（上限 12 MB）');
+  const target = modDirSafe(letheRoot, name);
+  ensureLayout(target, 'appearance');
+  const sprites = join(target, 'custom_sprites');
+  const file = `${kind}_${p}.png`;
+  for (const f of fs.readdirSync(sprites)) {
+    if (new RegExp('^' + kind + '_' + p + '\\.[a-z]+$', 'i').test(f)) fs.rmSync(join(sprites, f), { force: true });
+  }
+  fs.writeFileSync(join(sprites, file), buf);
+  return { file, bytes: buf.length, rel: 'custom_sprites/' + file };
+}
+
+/** 删除人格：实体 + 该 id 在所有语言 locale 里的条目 + personality-passive + profile/cg 贴图 */
+export function deletePersonality(letheRoot, name, id) {
+  const p = pIdOf(id);
+  const md = modDirSafe(letheRoot, name);
+  const files = [];
+  for (const f of pWalk(join(md, 'custom_limbus_data', 'personality'))) {
+    const payload = readJson(f, null);
+    const list = entitiesOf(payload);
+    if (!list.some((e) => String(e.id) === p)) continue;
+    if (payload && Array.isArray(payload.list) && payload.list.length > 1) {
+      files.push({ rel: pRelOf(md, f), content: JSON.stringify({ ...payload, list: payload.list.filter((e) => String(e.id) !== p) }, null, 2) });
+    } else {
+      files.push({ rel: pRelOf(md, f), content: null });
+    }
+  }
+  const locRoot = join(md, 'custom_limbus_locale');
+  for (const langDir of fs.existsSync(locRoot) ? fs.readdirSync(locRoot) : []) {
+    for (const f of pWalk(join(locRoot, langDir))) {
+      const payload = readJson(f, null);
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+      if (!Object.prototype.hasOwnProperty.call(payload, p)) continue;
+      const next = { ...payload };
+      delete next[p];
+      if (Object.keys(next).length === 0) files.push({ rel: pRelOf(md, f), content: null });
+      else files.push({ rel: pRelOf(md, f), content: JSON.stringify(next, null, 2) });
+    }
+  }
+  for (const f of pWalk(join(md, 'custom_limbus_data', 'personality-passive'))) {
+    const payload = readJson(f, null);
+    const list = entitiesOf(payload);
+    if (!list.some((e) => String(e.personalityID) === p)) continue;
+    if (payload && Array.isArray(payload.list) && payload.list.length > 1) {
+      files.push({ rel: pRelOf(md, f), content: JSON.stringify({ ...payload, list: payload.list.filter((e) => String(e.personalityID) !== p) }, null, 2) });
+    } else {
+      files.push({ rel: pRelOf(md, f), content: null });
+    }
+  }
+  const sprites = join(md, 'custom_sprites');
+  if (fs.existsSync(sprites)) {
+    for (const f of fs.readdirSync(sprites)) {
+      if (new RegExp('^(profile|cg)_' + p + '\\.[a-z]+$', 'i').test(f)) files.push({ rel: 'custom_sprites/' + f, content: null });
+    }
+  }
+  if (!files.length) bad('没有找到这个人格的可删文件');
+  const wrote = writeFilesTransactional({ modDir: md, files, root: letheRoot, mod: name, backup: true });
+  return { id: p, removed: files.filter((f) => f.content === null).map((f) => f.rel), wrote: wrote.written };
+}
+
+/** 被动挂接：kind = battle | supporter；默认写「同步等级 4」档 */
+export function passiveEdit(letheRoot, { name, id, kind = 'battle', op = 'add', passiveId = '', level = 4 }) {
+  const p = pIdOf(id);
+  if (kind !== 'battle' && kind !== 'supporter') bad('被动类型只能是 battle 或 supporter');
+  const lv = intIn(Number(level), 1, 4) ? Number(level) : 4;
+  const md = modDirSafe(letheRoot, name);
+  const dir = join(md, 'custom_limbus_data', 'personality-passive');
+  ensureLayout(md, 'passive');
+  let file = null;
+  let payload = null;
+  for (const f of pWalk(dir)) {
+    const pl = readJson(f, null);
+    const list = entitiesOf(pl);
+    if (list.some((e) => String(e.personalityID) === p)) { file = f; payload = pl; break; }
+  }
+  if (!file) {
+    file = join(dir, p + '.json');
+    payload = { list: [{ personalityID: Number(p), battlePassiveList: [], supporterPassiveList: [] }] };
+  }
+  const list = Array.isArray(payload.list) ? payload.list : [payload];
+  const ent = list.find((e) => String(e.personalityID) === p) || { personalityID: Number(p) };
+  if (!Array.isArray(ent.battlePassiveList)) ent.battlePassiveList = [];
+  if (!Array.isArray(ent.supporterPassiveList)) ent.supporterPassiveList = [];
+  if (!list.includes(ent)) list.push(ent);
+  const groups = kind === 'battle' ? ent.battlePassiveList : ent.supporterPassiveList;
+  let g = groups.find((x) => Number(x.level) === lv);
+  if (!g) { g = { level: lv, passiveIDList: [] }; groups.push(g); groups.sort((a, b) => Number(a.level) - Number(b.level)); }
+  if (!Array.isArray(g.passiveIDList)) g.passiveIDList = [];
+  if (op === 'add') {
+    const pid = String(passiveId || '').trim();
+    if (!/^\d{4,12}$/.test(pid)) bad('被动 id 必须是 4–12 位数字');
+    if (g.passiveIDList.map(String).includes(pid)) bad('这一档里已经挂了这个被动');
+    g.passiveIDList.push(pid);
+  } else if (op === 'rm') {
+    const pid = String(passiveId || '').trim();
+    const idx = g.passiveIDList.map(String).indexOf(pid);
+    if (idx < 0) bad('这一档里没有这个被动');
+    g.passiveIDList.splice(idx, 1);
+  } else bad('op 只能是 add 或 rm');
+  const wrote = writeFilesTransactional({
+    modDir: md,
+    files: [{ rel: pRelOf(md, file), content: JSON.stringify({ ...payload, list }, null, 2) }],
+    root: letheRoot,
+    mod: name,
+    backup: true,
+  });
+  return { kind, level: lv, passiveId: String(passiveId || ''), wrote: wrote.written };
+}
+
+/** 源码页：读人格实体 + locale + 被动挂接 + 所在文件 */
+export function personalitySource(letheRoot, name, id) {
+  const p = pIdOf(id);
+  const one = getPersonalityAny(letheRoot, name, p);
+  const passives = passiveSetOf(letheRoot, name, p);
+  return {
+    id: p,
+    entityRel: one.rel || '',
+    entity: one.entity,
+    locale: one.locale,
+    localeRel: one.localeRel || '',
+    passives: passives.entity || null,
+    passivesRel: passives.rel || '',
+    vanilla: Boolean(one.vanilla),
+  };
+}
+
+/** 源码页保存：整份替换实体与 locale（字段仍走白名单校验） */
+export function savePersonalitySource(letheRoot, { name, id, entity, locale }) {
+  const modName = cleanName(name, 'Mod 名称');
+  const patch = {};
+  if (entity && typeof entity === 'object') patch.entity = entity;
+  if (locale && typeof locale === 'object') patch.locale = locale;
+  const result = savePersonality(letheRoot, { name, id, ...patch, ignoreLock: true });
+  setSourceLocked(letheRoot, modName, String(id), true);
+  return { ...result, locked: true };
+}
+

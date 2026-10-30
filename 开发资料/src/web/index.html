@@ -4,46 +4,20 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>The Lethe Workbench</title>
+    <link rel="stylesheet" href="/ui-assets/frames.css">
+    <link rel="stylesheet" href="/ui-assets/dock.css">
+    <link rel="stylesheet" href="/ui-assets/nav.css">
+    <link rel="stylesheet" href="/ui-assets/sinner-cards.css">
+    <link rel="stylesheet" href="/ui-assets/sinner-emblems.css">
 <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/rank.css">
 </head>
 <body>
 <div id="app">
   <main id="view" class="view"></main>
 
-  <!-- 底栏：主行（名片 + 导航键）+ 状态行（永远在最上层，切页保留） -->
+  <!-- 底栏：细状态条 + 主行（名片 + 导航键）；永远在最上层，切页保留（v0.5：原版底栏样式，压低高度） -->
   <footer class="dock">
-    <div class="dock-main">
-      <div class="namecard" id="namecard">
-        <div class="nc-cell nc-name">
-          <span class="nc-label">编辑者</span>
-          <strong class="nc-strong" id="nc-name">但丁</strong>
-        </div>
-        <div class="nc-void"></div>
-        <div class="nc-cell nc-mod">
-          <span class="nc-label">Mod 数</span>
-          <strong class="nc-strong" id="nc-mod">—</strong>
-        </div>
-        <div class="nc-cell nc-dll">
-          <span class="nc-label">DLL 数</span>
-          <strong class="nc-strong" id="nc-dll">—</strong>
-        </div>
-        <div class="nc-cell nc-editor">
-          <span class="nc-label">编辑器</span>
-          <strong class="nc-mid" id="nc-editor">边狱工作台 Limbus Workshop</strong>
-          <small class="muted" id="nc-editorsub">The Lethe Workbench</small>
-        </div>
-        <div class="nc-cell nc-size">
-          <span class="nc-label">Mod 总体积</span>
-          <strong class="nc-strong" id="nc-size">—</strong>
-        </div>
-      </div>
-      <nav class="dock-nav">
-        <button class="dock-item" data-view="home"><span class="dock-icon">⌂</span><span>主页</span><small>HOME</small></button>
-        <button class="dock-item" data-view="mods"><span class="dock-icon">◆</span><span>Mod 管理</span><small>MANAGE</small></button>
-        <button class="dock-item" data-view="edit"><span class="dock-icon">✦</span><span>Mod 编辑</span><small>EDIT</small></button>
-        <button class="dock-item" data-view="import"><span class="dock-icon">⇩</span><span>Mod 导入</span><small>IMPORT</small></button>
-      </nav>
-    </div>
     <div class="dock-status">
       <span class="dot" id="root-dot"></span>
       <span id="st-root">尚未定位私服</span>
@@ -54,9 +28,36 @@
       <span class="sep">|</span>
       <span id="st-auto" class="muted">自动快照 —</span>
       <span class="spacer"></span>
-      <button class="btn ghost sm" id="btn-locate">重新定位</button>
-      <button class="btn ghost sm" id="btn-settings">设置</button>
+      <button class="link-btn" id="btn-locate">重新定位</button>
+      <button class="link-btn" id="btn-settings">设置</button>
       <span id="st-version" class="muted"></span>
+    </div>
+    <div class="dock-main">
+      <!-- 名片：仿原版玩家信息板（NO./LV 区 · 红标 · 徽章框 · 资源格 + 绿条），五项信息不变 -->
+      <div class="namecard" id="namecard">
+        <div class="nc-id">
+          <span class="nc-no">EDITOR · 编辑者</span>
+          <strong class="nc-big" id="nc-name">但丁</strong>
+        </div>
+        <span class="nc-redbar"></span>
+        <div class="nc-emblem" title="边狱工作台 · The Lethe Workbench">
+          <strong id="nc-editor">边狱工作台</strong>
+          <small>LIMBUS WORKSHOP</small>
+        </div>
+        <div class="nc-res">
+          <div class="nc-row">
+            <span class="nc-slot" title="Mod 数量（含禁用，不含备份）"><i class="nc-ico" style="background-image:var(--ui-nav-ico-mods)"></i><em>MOD</em><b id="nc-mod">—</b></span>
+            <span class="nc-slot" title="DLL 数量"><i class="nc-ico" style="background-image:var(--ui-nav-ico-import)"></i><em>DLL</em><b id="nc-dll">—</b></span>
+          </div>
+          <div class="nc-bar" title="所有 Mod 的总文件体积"><em>总体积</em><b id="nc-size">—</b></div>
+        </div>
+      </div>
+      <nav class="dock-nav">
+        <button class="dock-item" data-view="home"><i class="dock-icon" style="background-image:var(--ui-nav-ico-home)"></i><span>主页</span></button>
+        <button class="dock-item" data-view="mods"><i class="dock-icon" style="background-image:var(--ui-nav-ico-mods)"></i><span>Mod 管理</span></button>
+        <button class="dock-item" data-view="edit"><i class="dock-icon" style="background-image:var(--ui-nav-ico-edit)"></i><span>Mod 编辑</span></button>
+        <button class="dock-item" data-view="import"><i class="dock-icon" style="background-image:var(--ui-nav-ico-import)"></i><span>Mod 导入</span></button>
+      </nav>
     </div>
   </footer>
 

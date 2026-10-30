@@ -11,8 +11,9 @@ import { checkHost, checkToken, readBody, sendError, sendJson, serveStatic } fro
 import { EditSession } from '../lethe/session.mjs';
 import { AutoSaver } from '../lethe/autosave.mjs';
 import { markCleanExit, markRunning } from '../lethe/state.mjs';
+import { migrateToLcw } from '../lethe/lcw.mjs';
 
-export const VERSION = '0.7.0';
+export const VERSION = '0.8.6';
 const WEB_ROOT = join(SRC_DIR, 'web');
 
 export function createServer({ token, state, log, session, autosave } = {}) {
@@ -87,6 +88,9 @@ export function startServer({ port = 3081, host = '127.0.0.1', explicit, locateN
 
   const session = new EditSession(() => state.letheRoot);
   const autosave = new AutoSaver({ session, getLetheRoot: () => state.letheRoot, log });
+
+  // 存储迁移：旧位置（.lethe-workbench、C 盘 projects）→ <Lethe>/LCW
+  if (state.letheRoot) { try { migrateToLcw(state.letheRoot, log); } catch { /* 迁移失败不阻塞 */ } }
 
   // 运行标记：下次启动可检测“未被正常关闭”
   if (state.letheRoot) markRunning(state.letheRoot);
